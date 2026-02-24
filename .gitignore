@@ -1,0 +1,21 @@
+# STM32CubeIDE / CubeMX
+Debug/
+Release/
+*.elf
+*.map
+*.list
+*.o
+*.d
+*.su
+*.i
+*.s
+*.hex
+*.bin
+
+# CubeIDE settings
+.settings/
+*.launch
+
+# OS
+.DS_Store
+Thumbs.db
