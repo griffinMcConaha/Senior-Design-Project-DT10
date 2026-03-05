@@ -55,6 +55,25 @@ uint8_t LoRA_GetPendingCommand(uint8_t *out_state);
 // Get last command for debugging
 const char* LoRA_GetLastCommand(void);
 
+// Raw UART5 receive monitor helpers (line-based)
+const char* LoRA_GetLastRawFrame(void);
+uint32_t LoRA_GetRawFrameCount(void);
+
+// Get last transmitted LoRa payload for console/debug visibility
+const char* LoRA_GetLastTxPayload(void);
+
+// Send raw test string over LoRa UART (appends CRLF if missing)
+void LoRA_SendRaw(const char *text);
+
+// Enable/disable LoRa debug prints (default disabled for normal runtime)
+void LoRA_SetVerbose(uint8_t enable);
+
+// Link heartbeat metrics for console status
+uint32_t LoRA_GetLastTxMs(void);
+uint32_t LoRA_GetLastRxMs(void);
+uint32_t LoRA_GetTxCount(void);
+uint32_t LoRA_GetRxCount(void);
+
 #ifdef __cplusplus
 }
 #endif

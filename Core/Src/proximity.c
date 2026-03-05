@@ -35,10 +35,6 @@
 #define PROX_MAX_RANGE_CM 250      // Effective max range for control logic (cm)
 #define PROX_MAX_ECHO_TICKS (PROX_MAX_RANGE_CM * TICKS_PER_CM + 200)  // Echo timeout + margin
 
-// Baseline false echo rejection - reject measurements in the 77-79cm range (false echo signature)
-#define BASELINE_FALSE_ECHO_MIN_CM 76   // Reject this range as it's the false echo baseline
-#define BASELINE_FALSE_ECHO_MAX_CM 80
-
 // Sensor configuration
 typedef struct {
     uint8_t initialized;        // Sensor initialized flag
@@ -83,16 +79,10 @@ static uint16_t Proximity_MedianFilter(uint16_t *readings)
     return readings[2];
 }
 
-// Heuristic: if recent history is mostly "no detect" (zeros), treat baseline echoes as no detect
-static uint8_t Proximity_NoDetectHistory(const uint16_t *readings)
+// Return elapsed timer ticks with 16-bit wrap handling
+static uint16_t Proximity_TimerElapsedTicks(uint16_t now, uint16_t start)
 {
-    uint8_t zero_count = 0;
-    for (int i = 0; i < 5; i++) {
-        if (readings[i] == 0) {
-            zero_count++;
-        }
-    }
-    return (zero_count >= 3);
+    return (uint16_t)(now - start);
 }
 
 // Send 10 µs trigger pulse on trigger pin
@@ -224,23 +214,24 @@ static uint32_t Proximity_RawReadLeft(void)
     __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_CC2);
     
     // Wait for rising edge (timeout based on max range)
-    timeout = PROX_MAX_ECHO_TICKS;
-    while (!(htim1.Instance->SR & TIM_FLAG_CC2) && --timeout) {
-        if (htim1.Instance->CNT > PROX_MAX_ECHO_TICKS) break;
+    {
+        uint16_t wait_start = (uint16_t)htim1.Instance->CNT;
+        while (!(htim1.Instance->SR & TIM_FLAG_CC2)) {
+            uint16_t now = (uint16_t)htim1.Instance->CNT;
+            if (Proximity_TimerElapsedTicks(now, wait_start) > PROX_MAX_ECHO_TICKS)
+                return 0;
+        }
     }
-    if (!(htim1.Instance->SR & TIM_FLAG_CC2))
-        return 0;
     
     start_time = HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_2);
     __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_CC2);
     
     // Wait for falling edge (timeout based on max range)
-    timeout = PROX_MAX_ECHO_TICKS;
-    while (!(htim1.Instance->SR & TIM_FLAG_CC2) && --timeout) {
-        if (htim1.Instance->CNT > (start_time + PROX_MAX_ECHO_TICKS)) break;
+    while (!(htim1.Instance->SR & TIM_FLAG_CC2)) {
+        uint16_t now = (uint16_t)htim1.Instance->CNT;
+        if (Proximity_TimerElapsedTicks(now, (uint16_t)start_time) > PROX_MAX_ECHO_TICKS)
+            return 0;
     }
-    if (!(htim1.Instance->SR & TIM_FLAG_CC2))
-        return 0;
     
     end_time = HAL_TIM_ReadCapturedValue(&htim1, TIM_CHANNEL_2);
     __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_CC2);
@@ -285,23 +276,24 @@ static uint32_t Proximity_RawReadRight(void)
     __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_CC4);
     
     // Wait for rising edge (timeout based on max range)
-    timeout = PROX_MAX_ECHO_TICKS;
-    while (!(htim3.Instance->SR & TIM_FLAG_CC4) && --timeout) {
-        if (htim3.Instance->CNT > PROX_MAX_ECHO_TICKS) break;
+    {
+        uint16_t wait_start = (uint16_t)htim3.Instance->CNT;
+        while (!(htim3.Instance->SR & TIM_FLAG_CC4)) {
+            uint16_t now = (uint16_t)htim3.Instance->CNT;
+            if (Proximity_TimerElapsedTicks(now, wait_start) > PROX_MAX_ECHO_TICKS)
+                return 0;
+        }
     }
-    if (!(htim3.Instance->SR & TIM_FLAG_CC4))
-        return 0;
     
     start_time = HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_4);
     __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_CC4);
     
     // Wait for falling edge (timeout based on max range)
-    timeout = PROX_MAX_ECHO_TICKS;
-    while (!(htim3.Instance->SR & TIM_FLAG_CC4) && --timeout) {
-        if (htim3.Instance->CNT > (start_time + PROX_MAX_ECHO_TICKS)) break;
+    while (!(htim3.Instance->SR & TIM_FLAG_CC4)) {
+        uint16_t now = (uint16_t)htim3.Instance->CNT;
+        if (Proximity_TimerElapsedTicks(now, (uint16_t)start_time) > PROX_MAX_ECHO_TICKS)
+            return 0;
     }
-    if (!(htim3.Instance->SR & TIM_FLAG_CC4))
-        return 0;
     
     end_time = HAL_TIM_ReadCapturedValue(&htim3, TIM_CHANNEL_4);
     __HAL_TIM_CLEAR_FLAG(&htim3, TIM_FLAG_CC4);
@@ -352,29 +344,6 @@ uint16_t Proximity_ReadLeft(void)
         }
     }
     
-    // Check for false echo baseline signature: all 3 samples tightly clustered in 76-80cm range
-    // If all 3 are in baseline range with tight consistency (<30 ticks variation), it's the false echo
-    if (valid_samples == 3) {
-        uint16_t min_sample = (samples[0] < samples[1]) ? samples[0] : samples[1];
-        min_sample = (min_sample < samples[2]) ? min_sample : samples[2];
-        uint16_t max_sample = (samples[0] > samples[1]) ? samples[0] : samples[1];
-        max_sample = (max_sample > samples[2]) ? max_sample : samples[2];
-        uint16_t spread = max_sample - min_sample;
-        
-        uint16_t min_cm = min_sample / TICKS_PER_CM;
-        uint16_t max_cm = max_sample / TICKS_PER_CM;
-        
-        // If all samples are in baseline range AND VERY tightly clustered (<30 ticks), reject as false echo
-        // Real objects will show more jitter/variation when transitioning through this range
-        if (min_cm >= BASELINE_FALSE_ECHO_MIN_CM && max_cm <= BASELINE_FALSE_ECHO_MAX_CM && spread < 30) {
-            // Clear the rolling buffer since we have no valid reading
-            memset(prox_state.left_readings, 0, sizeof(prox_state.left_readings));
-            prox_state.left_index = 0;
-            prox_state.last_valid_left = 0;
-            return PROX_NO_DETECTION;
-        }
-    }
-    
     // If no valid samples, return "no detection" sentinel value
     if (valid_samples == 0) {
         // Clear the rolling buffer since we have no valid reading
@@ -418,13 +387,6 @@ uint16_t Proximity_ReadLeft(void)
         return PROX_NO_DETECTION;
     }
 
-    // Baseline false-echo handling: if we're mostly seeing no-detects, suppress 76-80cm echoes
-    if (distance >= BASELINE_FALSE_ECHO_MIN_CM && distance <= BASELINE_FALSE_ECHO_MAX_CM) {
-        if (prox_state.last_valid_left == 0 || Proximity_NoDetectHistory(prox_state.left_readings)) {
-            return PROX_NO_DETECTION;
-        }
-    }
-    
     // Rate-of-change validation: reject impossible jumps
     if (prox_state.last_valid_left > 0) {
         int change = abs((int)distance - (int)prox_state.last_valid_left);
@@ -489,29 +451,6 @@ uint16_t Proximity_ReadRight(void)
         }
     }
     
-    // Check for false echo baseline signature: all 3 samples tightly clustered in 76-80cm range
-    // If all 3 are in baseline range with tight consistency (<30 ticks variation), it's the false echo
-    if (valid_samples == 3) {
-        uint16_t min_sample = (samples[0] < samples[1]) ? samples[0] : samples[1];
-        min_sample = (min_sample < samples[2]) ? min_sample : samples[2];
-        uint16_t max_sample = (samples[0] > samples[1]) ? samples[0] : samples[1];
-        max_sample = (max_sample > samples[2]) ? max_sample : samples[2];
-        uint16_t spread = max_sample - min_sample;
-        
-        uint16_t min_cm = min_sample / TICKS_PER_CM;
-        uint16_t max_cm = max_sample / TICKS_PER_CM;
-        
-        // If all samples are in baseline range AND VERY tightly clustered (<30 ticks), reject as false echo
-        // Real objects will show more jitter/variation when transitioning through this range
-        if (min_cm >= BASELINE_FALSE_ECHO_MIN_CM && max_cm <= BASELINE_FALSE_ECHO_MAX_CM && spread < 30) {
-            // Clear the rolling buffer since we have no valid reading
-            memset(prox_state.right_readings, 0, sizeof(prox_state.right_readings));
-            prox_state.right_index = 0;
-            prox_state.last_valid_right = 0;
-            return PROX_NO_DETECTION;
-        }
-    }
-    
     // If no valid samples, return "no detection" sentinel value
     if (valid_samples == 0) {
         // Clear the rolling buffer since we have no valid reading
@@ -555,13 +494,6 @@ uint16_t Proximity_ReadRight(void)
         return PROX_NO_DETECTION;
     }
 
-    // Baseline false-echo handling: if we're mostly seeing no-detects, suppress 76-80cm echoes
-    if (distance >= BASELINE_FALSE_ECHO_MIN_CM && distance <= BASELINE_FALSE_ECHO_MAX_CM) {
-        if (prox_state.last_valid_right == 0 || Proximity_NoDetectHistory(prox_state.right_readings)) {
-            return PROX_NO_DETECTION;
-        }
-    }
-    
     // Rate-of-change validation: reject impossible jumps
     if (prox_state.last_valid_right > 0) {
         int change = abs((int)distance - (int)prox_state.last_valid_right);

@@ -3,6 +3,8 @@
 #include "robot_actions.h"
 #include "diagnostics.h"
 #include "sabertooth.h"
+#include "uart_lora.h"
+#include "dispersion.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -101,6 +103,37 @@ void Console_PrintStatus(const ConsoleIO_t *c,
     (void)c;
     if (!imu || !gps || !hf) return;
 
+    uint32_t now_ms = HAL_GetTick();
+    uint32_t disp_last_tx = Dispersion_GetLastTxMs();
+    uint32_t disp_last_rx = Dispersion_GetLastRxMs();
+    uint32_t lora_last_tx = LoRA_GetLastTxMs();
+    uint32_t lora_last_rx = LoRA_GetLastRxMs();
+
+    uint32_t disp_tx_age = disp_last_tx ? (now_ms - disp_last_tx) : 0xFFFFFFFFu;
+    uint32_t disp_rx_age = disp_last_rx ? (now_ms - disp_last_rx) : 0xFFFFFFFFu;
+    uint32_t lora_tx_age = lora_last_tx ? (now_ms - lora_last_tx) : 0xFFFFFFFFu;
+    uint32_t lora_rx_age = lora_last_rx ? (now_ms - lora_last_rx) : 0xFFFFFFFFu;
+
+    uint32_t disp_tx_count = Dispersion_GetTxCount();
+    uint32_t disp_rx_count = Dispersion_GetRxCount();
+    uint32_t lora_tx_count = LoRA_GetTxCount();
+    uint32_t lora_rx_count = LoRA_GetRxCount();
+
+    static uint32_t prev_disp_tx_count = 0;
+    static uint32_t prev_disp_rx_count = 0;
+    static uint32_t prev_lora_tx_count = 0;
+    static uint32_t prev_lora_rx_count = 0;
+
+    char disp_tx_hb = (disp_tx_count != prev_disp_tx_count) ? '*' : '-';
+    char disp_rx_hb = (disp_rx_count != prev_disp_rx_count) ? '*' : '-';
+    char lora_tx_hb = (lora_tx_count != prev_lora_tx_count) ? '*' : '-';
+    char lora_rx_hb = (lora_rx_count != prev_lora_rx_count) ? '*' : '-';
+
+    prev_disp_tx_count = disp_tx_count;
+    prev_disp_rx_count = disp_rx_count;
+    prev_lora_tx_count = lora_tx_count;
+    prev_lora_rx_count = lora_rx_count;
+
     printf(ANSI_MAGENTA "\r\n================ SENSOR STATUS ================\r\n" ANSI_RESET);
 
     printf(ANSI_CYAN "ACC (g):      %+10.6f  %+10.6f  %+10.6f\r\n" ANSI_RESET,
@@ -149,6 +182,20 @@ void Console_PrintStatus(const ConsoleIO_t *c,
            hf->gps_weight,
            1.0f - hf->gps_weight);
 
+        printf(ANSI_CYAN "ESP32 SB Link: " ANSI_RESET
+            "TX[%c] %s  RX[%c] %s\r\n",
+            disp_tx_hb,
+            (disp_tx_age == 0xFFFFFFFFu) ? "--" : (disp_tx_age < 3000u ? "OK" : "STALE"),
+            disp_rx_hb,
+            (disp_rx_age == 0xFFFFFFFFu) ? "--" : (disp_rx_age < 10000u ? "OK" : "STALE"));
+
+        printf(ANSI_CYAN "ESP32 LoRa Link: " ANSI_RESET
+            "TX[%c] %s  RX[%c] %s\r\n",
+            lora_tx_hb,
+            (lora_tx_age == 0xFFFFFFFFu) ? "--" : (lora_tx_age < 3000u ? "OK" : "STALE"),
+            lora_rx_hb,
+            (lora_rx_age == 0xFFFFFFFFu) ? "--" : (lora_rx_age < 15000u ? "OK" : "STALE"));
+
     printf(ANSI_MAGENTA "================================================\r\n" ANSI_RESET);
 }
 
@@ -161,6 +208,123 @@ static volatile uint8_t s_esc_pressed = 0;
 static inline void Console_WatchdogKick(void)
 {
     IWDG->KR = 0xAAAA;
+}
+
+static int Console_ReadLineBlocking(const char *prompt, char *out, size_t out_size)
+{
+    if (!out || out_size < 2) return 0;
+
+    extern UART_HandleTypeDef huart2;
+    size_t idx = 0;
+    out[0] = '\0';
+
+    // Clear any buffered CR/LF from the command that entered this prompt
+    while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+        (void)(huart2.Instance->DR & 0xFF);
+    }
+
+    if (prompt && prompt[0] != '\0') {
+        printf("%s", prompt);
+    }
+
+    while (1)
+    {
+        Console_WatchdogKick();
+
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+
+            if (ch == 0x1B) {
+                printf("\r\n[DIAG] Input cancelled\r\n");
+                out[0] = '\0';
+                return 0;
+            }
+
+            if (ch == '\r' || ch == '\n') {
+                // Ignore stray newline before user typed anything
+                if (idx == 0) {
+                    continue;
+                }
+                out[idx] = '\0';
+                printf("\r\n");
+                return 1;
+            }
+
+            if (ch == 0x08 || ch == 0x7F) {
+                if (idx > 0) {
+                    idx--;
+                    printf("\b \b");
+                }
+                continue;
+            }
+
+            if (ch >= 32 && ch < 127) {
+                if (idx < (out_size - 1)) {
+                    out[idx++] = (char)ch;
+                    printf("%c", ch);
+                }
+            }
+        }
+
+        if (Console_CheckEscPressed()) {
+            printf("\r\n[DIAG] Input cancelled\r\n");
+            out[0] = '\0';
+            return 0;
+        }
+
+        HAL_Delay(1);
+    }
+}
+
+static void Console_SendLoRaExampleCommands(void)
+{
+    static const char *examples[] = {
+        "CMD:MANUAL",
+        "CMD:AUTO,SALT:25,BRINE:75",
+        "CMD:PAUSE",
+        "CMD:ESTOP"
+    };
+
+    printf(ANSI_CYAN "[DIAG] Sending example LoRa control commands...\r\n" ANSI_RESET);
+    for (size_t i = 0; i < (sizeof(examples) / sizeof(examples[0])); i++) {
+        Console_WatchdogKick();
+        LoRA_SendRaw(examples[i]);
+        printf("[DIAG] LoRa example TX: %s\r\n", examples[i]);
+        HAL_Delay(200);
+    }
+    printf(ANSI_GREEN "[DIAG] LoRa example command sequence complete\r\n" ANSI_RESET);
+}
+
+static int Console_IsLikelySbEspFrame(const char *s)
+{
+    if (!s || s[0] == '\0') return 0;
+
+    // Known SB-ESP payload markers from UART4 path
+    if (strstr(s, "FLOW:") != NULL) return 1;
+    if (strstr(s, "STATUS:") != NULL) return 1;
+    if (strstr(s, "SALT:") != NULL) return 1;
+    if (strstr(s, "BRINE:") != NULL) return 1;
+
+    return 0;
+}
+
+static int Console_IsMostlyPrintableAscii(const char *s)
+{
+    if (!s || s[0] == '\0') return 0;
+
+    uint32_t printable = 0;
+    uint32_t total = 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p != '\0'; ++p) {
+        total++;
+        if ((*p >= 32 && *p <= 126) || *p == '\t') {
+            printable++;
+        }
+    }
+
+    if (total == 0) return 0;
+
+    // Require at least 85% printable bytes
+    return (printable * 100u) >= (85u * total);
 }
 
 void Console_ShowTestMenu(void)
@@ -183,6 +347,11 @@ void Console_ShowTestMenu(void)
     printf("C. TEST RAWCMD M2: 500 - Send raw Sabertooth command\r\n");
     printf(ANSI_CYAN "I. TEST I2C       - Scan I2C bus\r\n");
     printf("D. TEST IMUDETAIL - Detailed IMU check\r\n");
+    printf("L. TEST LORA SEND - Type and send raw LoRa string\r\n");
+    printf("R. TEST LORA RX   - Monitor incoming LoRa messages (press ESC)\r\n");
+    printf("X. TEST LORACMDS  - Send example LoRa control command set\r\n");
+    printf("E. TEST SBESP SEND - Type and send Salt-Brine ESP32 string\r\n");
+    printf("Q. TEST SBESP RX   - Monitor Salt-Brine ESP32 RX (press ESC)\r\n");
     printf("P. TEST PROXIMITY - Ultrasonic sensors left/right (press ESC)\r\n");
     printf("M. TEST SABERTOOTH MONITOR - Live feedback polling (press ESC)\r\n" ANSI_RESET);
     printf("Or type the full command (e.g. TEST MOTOR 1 25)\r\n");
@@ -448,6 +617,152 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
+    if (strcmp(cmd_upper, "L") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        char lora_text[160] = {0};
+        printf(ANSI_CYAN "\r\n[DIAG] ===== LoRa SEND MENU =====\r\n" ANSI_RESET);
+        printf("[DIAG] Type text and press ENTER to send over UART5\r\n");
+        printf("[DIAG] Press ESC to cancel and return\r\n");
+        printf("[DIAG] Example: PING or HELLO\r\n\r\n");
+        if (!Console_ReadLineBlocking("[DIAG] Enter LoRa text to send (ESC to cancel): ", lora_text, sizeof(lora_text))) {
+            Console_ShowTestMenu();
+            return;
+        }
+        if (lora_text[0] == '\0') {
+            printf("[DIAG] Empty input, nothing sent\r\n");
+            Console_ShowTestMenu();
+            return;
+        }
+        uint32_t tx_before = LoRA_GetTxCount();
+        LoRA_SendRaw(lora_text);
+        uint32_t tx_after = LoRA_GetTxCount();
+        if (tx_after > tx_before) {
+            printf("[DIAG] LoRa TX OK: %s\r\n", lora_text);
+        } else {
+            printf("[DIAG] LoRa TX FAILED (UART5 not ready?)\r\n");
+        }
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "R") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        extern UART_HandleTypeDef huart2;
+        uint32_t last_seen_count = LoRA_GetRawFrameCount();
+        uint32_t filtered_count = 0;
+        printf(ANSI_CYAN "[DIAG] LoRa RX monitor active (press ESC to exit)\r\n" ANSI_RESET);
+        while (1)
+        {
+            Console_WatchdogKick();
+            if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+                uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+                if (ch == 0x1B) break;
+            }
+            if (Console_CheckEscPressed()) break;
+
+            uint32_t current_count = LoRA_GetRawFrameCount();
+            if (current_count != last_seen_count) {
+                last_seen_count = current_count;
+                const char *raw = LoRA_GetLastRawFrame();
+                if (raw && raw[0] != '\0') {
+                    if (!Console_IsMostlyPrintableAscii(raw) || Console_IsLikelySbEspFrame(raw)) {
+                        filtered_count++;
+                    } else {
+                        printf("[DIAG] LoRa RX: %s\r\n", raw);
+                    }
+                }
+            }
+
+            HAL_Delay(50);
+        }
+        if (filtered_count > 0) {
+            printf("[DIAG] LoRa RX filtered %lu SB-ESP-like frame(s)\r\n", filtered_count);
+        }
+        printf("[DIAG] LoRa RX monitor stopped\r\n");
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "X") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Console_SendLoRaExampleCommands();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "E") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        char sb_text[160] = {0};
+        printf(ANSI_CYAN "\r\n[DIAG] ===== SB-ESP SEND MENU =====\r\n" ANSI_RESET);
+        printf("[DIAG] Type text and press ENTER to send over UART4\r\n");
+        printf("[DIAG] Press ESC to cancel and return\r\n");
+        printf("[DIAG] Example: PING or SALT:25,BRINE:75\r\n\r\n");
+        if (!Console_ReadLineBlocking("[DIAG] Enter SB-ESP text to send (ESC to cancel): ", sb_text, sizeof(sb_text))) {
+            Console_ShowTestMenu();
+            return;
+        }
+        if (sb_text[0] == '\0') {
+            printf("[DIAG] Empty input, nothing sent\r\n");
+            Console_ShowTestMenu();
+            return;
+        }
+
+        const char *before = Dispersion_GetLastStatus();
+        char before_buf[64] = {0};
+        if (before) {
+            strncpy(before_buf, before, sizeof(before_buf) - 1);
+            before_buf[sizeof(before_buf) - 1] = '\0';
+        }
+
+        Dispersion_SetTestResponseMode(1);
+        Dispersion_SendRaw(sb_text);
+        HAL_Delay(250);
+        const char *after = Dispersion_GetLastStatus();
+        if (after && strcmp(after, before_buf) != 0) {
+            printf("[DIAG] SB-ESP RX: %s\r\n", after);
+        } else {
+            printf("[DIAG] SB-ESP: no new RX yet (use Q / TEST SBESPRX to monitor)\r\n");
+        }
+        Dispersion_SetTestResponseMode(0);
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "Q") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        extern UART_HandleTypeDef huart2;
+        char last_seen[64] = {0};
+        Dispersion_SetTestResponseMode(1);
+        printf(ANSI_CYAN "[DIAG] SB-ESP RX monitor active (press ESC to exit)\r\n" ANSI_RESET);
+        while (1)
+        {
+            Console_WatchdogKick();
+            if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+                uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+                if (ch == 0x1B) break;
+            }
+            if (Console_CheckEscPressed()) break;
+
+            const char *msg = Dispersion_GetLastStatus();
+            if (msg && msg[0] != '\0' && strcmp(msg, last_seen) != 0) {
+                strncpy(last_seen, msg, sizeof(last_seen) - 1);
+                last_seen[sizeof(last_seen) - 1] = '\0';
+                printf("[DIAG] SB-ESP RX: %s\r\n", last_seen);
+            }
+
+            HAL_Delay(50);
+        }
+        Dispersion_SetTestResponseMode(0);
+        printf("[DIAG] SB-ESP RX monitor stopped\r\n");
+        Console_ShowTestMenu();
+        return;
+    }
+
     // ========== HELP COMMAND ==========
     if (strcmp(cmd_upper, "HELP") == 0 || strcmp(cmd_upper, "?") == 0)
     {
@@ -465,6 +780,11 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         printf("  TEST SALTSWEEP [delay]          - Sweep salt pump, delay in ms (default 100)\r\n");
         printf("  TEST BRINE <percent>            - Brine pump, 0-100%% (default 50)\r\n");
         printf("  TEST BRINESWEEP [delay]         - Sweep brine pump, delay in ms (default 100)\r\n");
+        printf("  TEST SBESP <text>               - Send raw Salt-Brine ESP32 string\r\n");
+        printf("  TEST SBESPRX                    - Monitor Salt-Brine ESP32 messages\r\n");
+        printf("  TEST LORA <text>                - Send raw LoRa string to ESP32\r\n");
+        printf("  TEST LORARX                     - Monitor incoming LoRa messages\r\n");
+        printf("  TEST LORACMDS                   - Send example LoRa control command set\r\n");
         printf("\r\n" ANSI_YELLOW "Other Commands:\r\n" ANSI_RESET);
         printf("  T                               - Show test menu\r\n");
         printf("  EXIT                            - Exit test mode\r\n");
@@ -648,6 +968,147 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             return;
         }
 
+        // TEST SBESP <text> (accept legacy alias TEST DISP <text>)
+        if (strncmp(subcmd_up, "SBESP", 5) == 0 || strncmp(subcmd_up, "DISP", 4) == 0)
+        {
+            if (strncmp(subcmd_up, "SBESP", 5) == 0) {
+                subcmd_up += 5;
+                subcmd_orig += 5;
+            } else {
+                subcmd_up += 4;
+                subcmd_orig += 4;
+            }
+            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
+                subcmd_up++;
+                subcmd_orig++;
+            }
+
+            if (*subcmd_orig == '\0') {
+                printf("[DIAG] Usage: TEST SBESP <text>\r\n");
+            } else {
+                const char *before = Dispersion_GetLastStatus();
+                char before_buf[64] = {0};
+                if (before) {
+                    strncpy(before_buf, before, sizeof(before_buf) - 1);
+                    before_buf[sizeof(before_buf) - 1] = '\0';
+                }
+
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(subcmd_orig);
+                HAL_Delay(250);
+                const char *after = Dispersion_GetLastStatus();
+                if (after && strcmp(after, before_buf) != 0) {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", after);
+                } else {
+                    printf("[DIAG] SB-ESP: no new RX yet (use TEST SBESPRX to monitor)\r\n");
+                }
+                Dispersion_SetTestResponseMode(0);
+            }
+            return;
+        }
+
+        // TEST SBESPRX (accept legacy alias TEST DISPRX)
+        if (strcmp(subcmd_up, "SBESPRX") == 0 || strcmp(subcmd_up, "DISPRX") == 0)
+        {
+            extern UART_HandleTypeDef huart2;
+            char last_seen[64] = {0};
+            Dispersion_SetTestResponseMode(1);
+            printf(ANSI_CYAN "[DIAG] SB-ESP RX monitor active (press ESC to exit)\r\n" ANSI_RESET);
+            while (1)
+            {
+                Console_WatchdogKick();
+                if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+                    uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+                    if (ch == 0x1B) break;
+                }
+                if (Console_CheckEscPressed()) break;
+
+                const char *msg = Dispersion_GetLastStatus();
+                if (msg && msg[0] != '\0' && strcmp(msg, last_seen) != 0) {
+                    strncpy(last_seen, msg, sizeof(last_seen) - 1);
+                    last_seen[sizeof(last_seen) - 1] = '\0';
+                    printf("[DIAG] SB-ESP RX: %s\r\n", last_seen);
+                }
+
+                HAL_Delay(50);
+            }
+            Dispersion_SetTestResponseMode(0);
+            printf("[DIAG] SB-ESP RX monitor stopped\r\n");
+            Console_ShowTestMenu();
+            return;
+        }
+
+        // TEST LORACMDS
+        if (strcmp(subcmd_up, "LORACMDS") == 0)
+        {
+            Console_SendLoRaExampleCommands();
+            return;
+        }
+
+        // TEST LORA <text>
+        if (strncmp(subcmd_up, "LORA", 4) == 0)
+        {
+            subcmd_up += 4;
+            subcmd_orig += 4;
+            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
+                subcmd_up++;
+                subcmd_orig++;
+            }
+
+            if (*subcmd_orig == '\0') {
+                printf("[DIAG] Usage: TEST LORA <text>\r\n");
+            } else {
+                uint32_t tx_before = LoRA_GetTxCount();
+                LoRA_SendRaw(subcmd_orig);
+                uint32_t tx_after = LoRA_GetTxCount();
+                if (tx_after > tx_before) {
+                    printf("[DIAG] LoRa TX OK: %s\r\n", subcmd_orig);
+                } else {
+                    printf("[DIAG] LoRa TX FAILED (UART5 not ready?)\r\n");
+                }
+            }
+            return;
+        }
+
+        // TEST LORARX
+        if (strcmp(subcmd_up, "LORARX") == 0)
+        {
+            extern UART_HandleTypeDef huart2;
+            uint32_t last_seen_count = LoRA_GetRawFrameCount();
+            uint32_t filtered_count = 0;
+            printf(ANSI_CYAN "[DIAG] LoRa RX monitor active (press ESC to exit)\r\n" ANSI_RESET);
+            while (1)
+            {
+                Console_WatchdogKick();
+                if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+                    uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+                    if (ch == 0x1B) break;
+                }
+                if (Console_CheckEscPressed()) break;
+
+                uint32_t current_count = LoRA_GetRawFrameCount();
+                if (current_count != last_seen_count) {
+                    last_seen_count = current_count;
+                    const char *raw = LoRA_GetLastRawFrame();
+                    if (raw && raw[0] != '\0') {
+                        if (!Console_IsMostlyPrintableAscii(raw) || Console_IsLikelySbEspFrame(raw)) {
+                            filtered_count++;
+                        } else {
+                            printf("[DIAG] LoRa RX: %s\r\n", raw);
+                        }
+                    }
+                }
+
+                HAL_Delay(50);
+            }
+            if (filtered_count > 0) {
+                printf("[DIAG] LoRa RX filtered %lu SB-ESP-like frame(s)\r\n", filtered_count);
+            }
+            printf("[DIAG] LoRa RX monitor stopped\r\n");
+            Console_ShowTestMenu();
+            return;
+        }
+
         // TEST IMU
         if (strcmp(subcmd_up, "IMU") == 0)
         {
@@ -759,6 +1220,11 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         printf("  TEST SALTSWEEP [delay_ms]    - Sweep salt 0-100%%\r\n");
         printf("  TEST BRINE <0-100>           - Single brine rate test\r\n");
         printf("  TEST BRINESWEEP [delay_ms]   - Sweep brine 0-100%%\r\n");
+        printf("  TEST SBESP <text>            - Send raw Salt-Brine ESP32 string (alias: TEST DISP)\r\n");
+        printf("  TEST SBESPRX                 - Monitor Salt-Brine ESP32 messages (alias: TEST DISPRX)\r\n");
+        printf("  TEST LORA <text>             - Send raw LoRa string to ESP32\r\n");
+        printf("  TEST LORARX                  - Monitor incoming LoRa messages\r\n");
+        printf("  TEST LORACMDS                - Send example LoRa control command set\r\n");
         printf("  TEST GPS                     - Read GPS data\r\n");
         printf("  TEST IMU                     - Read IMU data\r\n");
         printf("  TEST IMUDETAIL               - Detailed IMU I2C check\r\n");

@@ -199,8 +199,11 @@ void Diag_TestSaltRate(uint8_t rate_percent)
 
     printf(ANSI_CYAN "[DIAG] Testing Salt Rate: %d%%\r\n" ANSI_RESET, rate_percent);
 
-    // Set salt rate (brine auto-adjusts to maintain 1:9 ratio)
-    Dispersion_SetRate(rate_percent, 0); // Brine will be auto-set
+    // Enable detailed ESP responses only during active salt test
+    Dispersion_SetTestResponseMode(1);
+
+    // Send percentage-only payload; ESP32-SB handles mapping logic
+    Dispersion_SendPercentOnly(rate_percent);
 
     printf(ANSI_GREEN "[DIAG] Salt Rate %d%% applied\r\n" ANSI_RESET, rate_percent);
     printf(ANSI_CYAN "[DIAG] Press ESC to stop and reset to 0%%\r\n\r\n" ANSI_RESET);
@@ -222,7 +225,8 @@ void Diag_TestSaltRate(uint8_t rate_percent)
     }
 
     // Reset to 0
-    Dispersion_SetRate(0, 0);
+    Dispersion_SendPercentOnly(0);
+    Dispersion_SetTestResponseMode(0);
     printf("\r\n" ANSI_GREEN "[DIAG] Salt rate reset to 0%%\r\n\r\n" ANSI_RESET);
     Console_ShowTestMenu();
 }
@@ -278,15 +282,14 @@ void Diag_TestBrineRate(uint8_t rate_percent)
 
     printf(ANSI_CYAN "[DIAG] Testing Brine Rate: %d%%\r\n" ANSI_RESET, rate_percent);
 
-    // For brine testing, we need to set salt proportionally (1:9 ratio)
-    // If brine = 90%, then salt should be = 10% (90/9 = 10)
-    uint8_t salt_rate = rate_percent / 9;
-    if (salt_rate == 0 && rate_percent > 0) salt_rate = 1; // Minimum 1% salt if brine > 0
+    // Enable detailed ESP responses only during active brine test
+    Dispersion_SetTestResponseMode(1);
 
-    Dispersion_SetRate(salt_rate, rate_percent);
+        // Send percentage-only payload; ESP32-SB handles mapping logic
+        Dispersion_SendPercentOnly(rate_percent);
 
-    printf(ANSI_GREEN "[DIAG] Brine Rate %d%% applied (Salt: %d%%)\r\n" ANSI_RESET, 
-           rate_percent, salt_rate);
+        printf(ANSI_GREEN "[DIAG] Brine Rate %d%% applied\r\n" ANSI_RESET,
+            rate_percent);
     printf(ANSI_CYAN "[DIAG] Press ESC to stop and reset to 0%%\r\n\r\n" ANSI_RESET);
 
     // Wait for ESC
@@ -306,7 +309,8 @@ void Diag_TestBrineRate(uint8_t rate_percent)
     }
 
     // Reset to 0
-    Dispersion_SetRate(0, 0);
+    Dispersion_SendPercentOnly(0);
+    Dispersion_SetTestResponseMode(0);
     printf("\r\n" ANSI_GREEN "[DIAG] Brine rate reset to 0%%\r\n\r\n" ANSI_RESET);
     Console_ShowTestMenu();
 }

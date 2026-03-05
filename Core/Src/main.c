@@ -115,6 +115,8 @@ volatile int stop_requested = 0;          // ESTOP button pressed
 volatile uint8_t imu_ok = 1;              // IMU health status
 volatile uint32_t imu_last_update_ms = 0; // Last IMU read timestamp
 volatile uint8_t g_test_mode = 0;         // 1 = stay in test mode until reset
+static uint8_t s_disp_uart4_rx_byte = 0;
+static uint8_t s_lora_uart5_rx_byte = 0;
 
 // UART Interrupt callback for GPS, Sabertooth, Dispersion (UART4), and LoRA (UART5)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -129,14 +131,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       }
     } else if (huart->Instance == UART4) {
         // Dispersion ESP32 response handler
-        if (huart->pRxBuffPtr && huart->RxXferSize > 0) {
-            Dispersion_RxByte(huart->pRxBuffPtr[0]);
-        }
+      Dispersion_RxByte(s_disp_uart4_rx_byte);
+      HAL_UART_Receive_IT(&huart4, &s_disp_uart4_rx_byte, 1);
     } else if (huart->Instance == UART5) {
         // LoRA remote control command handler
-        if (huart->pRxBuffPtr && huart->RxXferSize > 0) {
-            LoRA_RxByte(huart->pRxBuffPtr[0]);
-        }
+      LoRA_RxByte(s_lora_uart5_rx_byte);
+      HAL_UART_Receive_IT(&huart5, &s_lora_uart5_rx_byte, 1);
     }
 }
 
@@ -245,6 +245,10 @@ int main(void)
   Proximity_Init();  // Initialize proximity sensors
   Dispersion_Init(&huart4); // Initialize dispersion system (salt + brine) with UART 4
   LoRA_Init(&huart5);       // Initialize LoRA remote control via UART 5
+  HAL_UART_Receive_IT(&huart4, &s_disp_uart4_rx_byte, 1);
+  HAL_UART_Receive_IT(&huart5, &s_lora_uart5_rx_byte, 1);
+  printf("[UART MAP] SB-ESP: UART4 TX=PC10 RX=PC11 @9600\r\n");
+  printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @115200\r\n");
   Mission_Init();    // Initialize mission management module
   HAL_Delay(100);
 
@@ -384,7 +388,10 @@ int main(void)
           uint8_t lora_cmd = 0;
           if (LoRA_GetPendingCommand(&lora_cmd)) {
               RobotSM_Request(&g_sm, (RobotState_t)lora_cmd);
-              printf("[MAIN] LoRA command received: new state = %u\r\n", lora_cmd);
+              const char *lora_raw = LoRA_GetLastCommand();
+              printf("[LoRa] command received: %s -> state=%u\r\n",
+                 (lora_raw && lora_raw[0] != '\0') ? lora_raw : "<empty>",
+                 lora_cmd);
           }
 
           // State machine task dispatch (Phase 2 and 3)
@@ -474,6 +481,11 @@ int main(void)
                      g_hf.yaw_deg, g_hf.pitch_deg,
                      salt_rate, brine_rate, imu_temp,
                      prox_left_str, prox_right_str);
+
+                  const char *lora_tx_payload = LoRA_GetLastTxPayload();
+                  if (lora_tx_payload && lora_tx_payload[0] != '\0') {
+                    printf(ANSI_YELLOW "[MAIN] LoRa TX: " ANSI_RESET "%s", lora_tx_payload);
+                  }
           }
       }  /* Close the 50 Hz if block */
   }  /* Close the while(1) loop */
