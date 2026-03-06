@@ -13,6 +13,8 @@
 
 #define LORA_RX_BUFFER_SIZE 128
 #define LORA_COMMAND_TIMEOUT_MS 5000
+#define LORA_STREAM_BUFFER_SIZE 256
+#define LORA_TX_DIAGNOSTICS_ENABLED 0
 
 typedef struct {
     UART_HandleTypeDef *huart;
@@ -33,10 +35,33 @@ typedef struct {
     uint8_t stream_seq_init;
     uint32_t stream_expected_seq;
     uint32_t stream_gap_count;
+    char stream_buffer[LORA_STREAM_BUFFER_SIZE];
+    uint16_t stream_len;
 } LoRA_State_t;
 
 static LoRA_State_t lora_state = {0};
 static uint8_t s_lora_verbose = 0;
+
+static void lora_uart5_send(const char *msg, const char *tag)
+{
+    if (!lora_state.huart || !msg) return;
+
+#if LORA_TX_DIAGNOSTICS_ENABLED
+    HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+    strncpy(lora_state.last_tx_payload, msg, sizeof(lora_state.last_tx_payload) - 1);
+    lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
+    lora_state.last_tx_ms = HAL_GetTick();
+    lora_state.tx_count++;
+    if (s_lora_verbose) {
+        printf("[LORA] Sent %s: %s", tag ? tag : "", msg);
+    }
+#else
+    (void)tag;
+    if (s_lora_verbose) {
+        printf("[LORA] TX suppressed\r\n");
+    }
+#endif
+}
 
 static const char* lora_unwrap_stream_frame(char *msg, uint32_t *out_seq, uint8_t *out_has_seq)
 {
@@ -82,11 +107,13 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.stream_seq_init = 0;
     lora_state.stream_expected_seq = 0;
     lora_state.stream_gap_count = 0;
+    lora_state.stream_len = 0;
     memset(lora_state.rx_buffer, 0, LORA_RX_BUFFER_SIZE);
     memset(lora_state.raw_buffer, 0, LORA_RX_BUFFER_SIZE);
     memset(lora_state.last_raw_frame, 0, sizeof(lora_state.last_raw_frame));
     memset(lora_state.last_command, 0, sizeof(lora_state.last_command));
     memset(lora_state.last_tx_payload, 0, sizeof(lora_state.last_tx_payload));
+    memset(lora_state.stream_buffer, 0, sizeof(lora_state.stream_buffer));
 
     if (s_lora_verbose) {
         printf("[LORA] LoRA module initialized on UART5 (9600 baud)\r\n");
@@ -127,6 +154,9 @@ void LoRA_RxByte(uint8_t byte)
             uint32_t stream_seq = 0;
             uint8_t has_stream_seq = 0;
             const char *cmd = lora_unwrap_stream_frame((char *)lora_state.rx_buffer, &stream_seq, &has_stream_seq);
+            const char *payload = cmd;
+            uint8_t chunk_marked = 0;
+            uint8_t chunk_is_end = 1;
 
             if (has_stream_seq) {
                 if (!lora_state.stream_seq_init) {
@@ -141,8 +171,38 @@ void LoRA_RxByte(uint8_t byte)
                                    (unsigned long)lora_state.stream_expected_seq,
                                    (unsigned long)lora_state.stream_gap_count);
                         }
+                        lora_state.stream_len = 0;
                     }
                     lora_state.stream_expected_seq = stream_seq + 1;
+                }
+
+                if (payload && (payload[0] == 'M' || payload[0] == 'E') && payload[1] == ':') {
+                    chunk_marked = 1;
+                    chunk_is_end = (payload[0] == 'E') ? 1u : 0u;
+                    payload += 2;
+                }
+
+                if (chunk_marked) {
+                    size_t pl = strlen(payload);
+                    size_t remain = (size_t)(LORA_STREAM_BUFFER_SIZE - 1 - lora_state.stream_len);
+                    if (pl > remain) {
+                        pl = remain;
+                    }
+                    if (pl > 0) {
+                        memcpy(&lora_state.stream_buffer[lora_state.stream_len], payload, pl);
+                        lora_state.stream_len += (uint16_t)pl;
+                        lora_state.stream_buffer[lora_state.stream_len] = '\0';
+                    }
+
+                    if (!chunk_is_end) {
+                        lora_state.rx_index = 0;
+                        return;
+                    }
+
+                    cmd = lora_state.stream_buffer;
+                    lora_state.stream_len = 0;
+                } else {
+                    cmd = payload;
                 }
             }
 
@@ -268,15 +328,17 @@ void LoRA_Tick(uint32_t now_ms)
     }
 
     // Report health status to system health monitor
-    // Consider LoRA healthy if we've transmitted recently (heartbeat every ~5 seconds from main loop)
-    if (lora_state.last_tx_ms == 0) {
-        // Not initialized yet
+    // Consider LoRa healthy if any RX/TX activity has happened recently.
+    uint32_t last_activity_ms = lora_state.last_tx_ms;
+    if (lora_state.last_rx_ms > last_activity_ms) {
+        last_activity_ms = lora_state.last_rx_ms;
+    }
+
+    if (last_activity_ms == 0) {
         SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
-    } else if ((now_ms - lora_state.last_tx_ms) > 10000) {
-        // No transmission for >10 seconds = timeout
+    } else if ((now_ms - last_activity_ms) > 10000) {
         SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
     } else {
-        // Regular transmissions happening
         SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_OK);
     }
 }
@@ -303,14 +365,7 @@ void LoRA_SendState(uint8_t state, float gps_lat, float gps_lon,
              "{\"state\":\"%s\",\"gps\":{\"lat\":%.4f,\"lon\":%.4f},\"motor\":{\"m1\":%d,\"m2\":%d}}\r\n",
              state_name, gps_lat, gps_lon, motor_m1, motor_m2);
 
-    HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
-    strncpy(lora_state.last_tx_payload, msg, sizeof(lora_state.last_tx_payload) - 1);
-    lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
-    lora_state.last_tx_ms = HAL_GetTick();
-    lora_state.tx_count++;
-    if (s_lora_verbose) {
-        printf("[LORA] Sent: %s", msg);
-    }
+    lora_uart5_send(msg, "state");
 }
 
 // Send comprehensive telemetry to base station (JSON format)
@@ -353,14 +408,7 @@ void LoRA_SendTelemetry(uint8_t state, float gps_lat, float gps_lon, uint8_t gps
              motor_m1, motor_m2, yaw_deg, pitch_deg, salt_rate, brine_rate, temp_c,
              prox_left_json, prox_right_json);
 
-    HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
-    strncpy(lora_state.last_tx_payload, msg, sizeof(lora_state.last_tx_payload) - 1);
-    lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
-    lora_state.last_tx_ms = HAL_GetTick();
-    lora_state.tx_count++;
-    if (s_lora_verbose) {
-        printf("[LORA] Sent telemetry: %s", msg);
-    }
+    lora_uart5_send(msg, "telemetry");
 }
 
 // Send fault information to base station (JSON format)
@@ -394,14 +442,7 @@ void LoRA_SendFault(uint8_t fault_code, uint8_t action)
     char msg[96];
     snprintf(msg, sizeof(msg), "{\"fault\":\"%s\",\"action\":\"%s\"}\r\n", fault_name, action_name);
 
-    HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
-    strncpy(lora_state.last_tx_payload, msg, sizeof(lora_state.last_tx_payload) - 1);
-    lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
-    lora_state.last_tx_ms = HAL_GetTick();
-    lora_state.tx_count++;
-    if (s_lora_verbose) {
-        printf("[LORA] Sent: %s", msg);
-    }
+    lora_uart5_send(msg, "fault");
 }
 
 // Parse and execute incoming command
