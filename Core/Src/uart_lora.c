@@ -14,7 +14,7 @@
 #define LORA_RX_BUFFER_SIZE 128
 #define LORA_COMMAND_TIMEOUT_MS 5000
 #define LORA_STREAM_BUFFER_SIZE 256
-#define LORA_TX_DIAGNOSTICS_ENABLED 0
+#define LORA_TX_DIAGNOSTICS_ENABLED 1
 
 typedef struct {
     UART_HandleTypeDef *huart;
@@ -90,7 +90,7 @@ static const char* lora_unwrap_stream_frame(char *msg, uint32_t *out_seq, uint8_
     return endptr + 1;
 }
 
-// Initialize LoRA UART interface (UART5, 9600 baud)
+// Initialize LoRA UART interface (UART5, 115200 baud)
 void LoRA_Init(UART_HandleTypeDef *huart5)
 {
     if (!huart5) return;
@@ -116,7 +116,7 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     memset(lora_state.stream_buffer, 0, sizeof(lora_state.stream_buffer));
 
     if (s_lora_verbose) {
-        printf("[LORA] LoRA module initialized on UART5 (9600 baud)\r\n");
+        printf("[LORA] LoRA module initialized on UART5 (115200 baud)\r\n");
     }
 }
 
