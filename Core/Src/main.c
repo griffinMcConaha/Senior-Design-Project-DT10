@@ -118,6 +118,138 @@ volatile uint8_t g_test_mode = 0;         // 1 = stay in test mode until reset
 static uint8_t s_disp_uart4_rx_byte = 0;
 static uint8_t s_lora_uart5_rx_byte = 0;
 
+static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
+{
+  int m1_speed = 0;
+  int m2_speed = 0;
+  const char *cmd_name = "UNKNOWN";
+
+  switch (cmd)
+  {
+    case LORA_MANUAL_CMD_FORWARD:
+      cmd_name = "FORWARD";
+      m1_speed = 40;
+      m2_speed = 40;
+      break;
+    case LORA_MANUAL_CMD_BACK:
+      cmd_name = "BACK";
+      m1_speed = -35;
+      m2_speed = -35;
+      break;
+    case LORA_MANUAL_CMD_LEFT:
+      cmd_name = "LEFT";
+      m1_speed = -25;
+      m2_speed = 25;
+      break;
+    case LORA_MANUAL_CMD_RIGHT:
+      cmd_name = "RIGHT";
+      m1_speed = 25;
+      m2_speed = -25;
+      break;
+    case LORA_MANUAL_CMD_STOP:
+      cmd_name = "STOP";
+      m1_speed = 0;
+      m2_speed = 0;
+      break;
+    case LORA_MANUAL_CMD_NONE:
+    default:
+      return;
+  }
+
+  RobotSM_Request(&g_sm, STATE_MANUAL);
+  Sabertooth_SetM1(m1_speed);
+  Sabertooth_SetM2(m2_speed);
+
+  char ack_msg[64];
+  snprintf(ack_msg, sizeof(ack_msg), "ACK:%s", cmd_name);
+  LoRA_SendRaw(ack_msg);
+
+  printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+  printf("[LoRa] manual cmd: %s -> M1=%d M2=%d\r\n", cmd_name, m1_speed, m2_speed);
+}
+
+static uint8_t ParseLoRaJsonCmdInMain(const char *frame,
+                                      LoRA_ManualCommand_t *out_manual_cmd,
+                                      uint8_t *out_state,
+                                      uint8_t *out_is_state)
+{
+  if (!frame || !out_manual_cmd || !out_state || !out_is_state) return 0;
+  *out_manual_cmd = LORA_MANUAL_CMD_NONE;
+  *out_state = 0;
+  *out_is_state = 0;
+
+  const char *json_start = strchr(frame, '{');
+  if (!json_start) return 0;
+
+  const char *key = "\"cmd\"";
+  const char *p = strstr(json_start, key);
+  if (!p) return 0;
+
+  p += strlen(key);
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p != ':') return 0;
+  p++;
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p != '"') return 0;
+  p++;
+
+  char cmd_buf[24];
+  int cmd_len = 0;
+  while (*p && *p != '"' && cmd_len < (int)sizeof(cmd_buf) - 1) {
+    char c = *p++;
+    if (c >= 'a' && c <= 'z') {
+      c = (char)(c - 'a' + 'A');
+    }
+    cmd_buf[cmd_len++] = c;
+  }
+  cmd_buf[cmd_len] = '\0';
+  if (cmd_len == 0 || *p != '"') return 0;
+
+  if (strcmp(cmd_buf, "FORWARD") == 0) {
+    *out_manual_cmd = LORA_MANUAL_CMD_FORWARD;
+    return 1;
+  }
+  if (strcmp(cmd_buf, "BACK") == 0 || strcmp(cmd_buf, "BACKWARD") == 0) {
+    *out_manual_cmd = LORA_MANUAL_CMD_BACK;
+    return 1;
+  }
+  if (strcmp(cmd_buf, "LEFT") == 0) {
+    *out_manual_cmd = LORA_MANUAL_CMD_LEFT;
+    return 1;
+  }
+  if (strcmp(cmd_buf, "RIGHT") == 0) {
+    *out_manual_cmd = LORA_MANUAL_CMD_RIGHT;
+    return 1;
+  }
+  if (strcmp(cmd_buf, "STOP") == 0) {
+    *out_manual_cmd = LORA_MANUAL_CMD_STOP;
+    return 1;
+  }
+
+  if (strcmp(cmd_buf, "AUTO") == 0) {
+    *out_is_state = 1;
+    *out_state = 1;
+    return 1;
+  }
+  if (strcmp(cmd_buf, "MANUAL") == 0) {
+    *out_is_state = 1;
+    *out_state = 0;
+    return 1;
+  }
+  if (strcmp(cmd_buf, "PAUSE") == 0) {
+    *out_is_state = 1;
+    *out_state = 2;
+    return 1;
+  }
+  if (strcmp(cmd_buf, "ESTOP") == 0) {
+    *out_is_state = 1;
+    *out_state = 4;
+    return 1;
+  }
+
+  return 0;
+}
+
 // UART Interrupt callback for GPS, Sabertooth, Dispersion (UART4), and LoRA (UART5)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -314,7 +446,10 @@ int main(void)
   /* Main control loop */
   /* USER CODE BEGIN WHILE */
   uint32_t last_50hz_ms = HAL_GetTick();
-  uint32_t last_1hz_ms  = HAL_GetTick();
+  uint32_t last_1hz_ms = HAL_GetTick();
+  uint32_t last_lora_tx_ms = HAL_GetTick();
+  const uint32_t lora_tx_interval_ms = 10000;
+  uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
 
   while (1)
   {
@@ -385,14 +520,45 @@ int main(void)
 	  	  SystemHealth_UpdateLeds(RobotSM_Current(&g_sm), imu_ok, gps->has_fix);
 
           // Check for incoming LoRA commands and forward to state machine
+          uint8_t lora_handled = 0;
           uint8_t lora_cmd = 0;
           if (LoRA_GetPendingCommand(&lora_cmd)) {
               RobotSM_Request(&g_sm, (RobotState_t)lora_cmd);
               const char *lora_raw = LoRA_GetLastCommand();
+              printf("[APP CMD RECEIVED] state=%u\r\n", lora_cmd);
               printf("[LoRa] command received: %s -> state=%u\r\n",
                  (lora_raw && lora_raw[0] != '\0') ? lora_raw : "<empty>",
                  lora_cmd);
+              lora_handled = 1;
           }
+
+            LoRA_ManualCommand_t lora_manual_cmd = LORA_MANUAL_CMD_NONE;
+            if (LoRA_GetPendingManualCommand(&lora_manual_cmd)) {
+              HandleLoRaManualCommand(lora_manual_cmd);
+              lora_handled = 1;
+            }
+
+            if (!lora_handled) {
+              uint32_t raw_count = LoRA_GetRawFrameCount();
+              if (raw_count != last_lora_raw_count_seen) {
+                last_lora_raw_count_seen = raw_count;
+                const char *raw_frame = LoRA_GetLastRawFrame();
+                LoRA_ManualCommand_t fallback_manual = LORA_MANUAL_CMD_NONE;
+                uint8_t fallback_state = 0;
+                uint8_t fallback_is_state = 0;
+                if (ParseLoRaJsonCmdInMain(raw_frame, &fallback_manual, &fallback_state, &fallback_is_state)) {
+                  if (fallback_is_state) {
+                    RobotSM_Request(&g_sm, (RobotState_t)fallback_state);
+                    printf("[APP CMD RECEIVED] json_state=%u\r\n", fallback_state);
+                    printf("[LoRa] JSON command received (main): %s -> state=%u\r\n",
+                           (raw_frame && raw_frame[0] != '\0') ? raw_frame : "<empty>",
+                           fallback_state);
+                  } else {
+                    HandleLoRaManualCommand(fallback_manual);
+                  }
+                }
+              }
+            }
 
           // State machine task dispatch (Phase 2 and 3)
           RobotState_t current_state = RobotSM_Current(&g_sm);
@@ -420,8 +586,8 @@ int main(void)
           // Update LoRA periodic tasks (timeout checking, etc.)
           LoRA_Tick(now_ms);
 
-          // ---- 1 Hz prints and telemetry (SKIP during test mode) ----
-          if ((now_ms - last_1hz_ms) >= 1000 && !g_test_mode)
+            // ---- 1 Hz status/readout prints (SKIP during test mode) ----
+            if ((now_ms - last_1hz_ms) >= 1000 && !g_test_mode)
           {
               last_1hz_ms += 1000;
               
@@ -447,15 +613,24 @@ int main(void)
               uint8_t gps_num_sat = gps->num_satellites;
               float gps_hdop = gps->hdop;
               
-              // Send comprehensive telemetry to LoRA ESP32 (mobile app / base station)
-              // Includes: state, GPS position + quality, motor speeds, heading, pitch, dispersion rates, temperature, proximity
-              LoRA_SendTelemetry(RobotSM_Current(&g_sm),
-                                 gps->latitude_deg, gps->longitude_deg, gps->has_fix,
-                                 gps_num_sat, gps_hdop,
-                                 m1_speed, m2_speed,
-                                 g_hf.yaw_deg, g_hf.pitch_deg,
-                                 salt_rate, brine_rate, imu_temp,
-                                 prox_left_cm, prox_right_cm);
+              if ((now_ms - last_lora_tx_ms) >= lora_tx_interval_ms) {
+                  last_lora_tx_ms += lora_tx_interval_ms;
+
+                  // Send comprehensive telemetry to LoRA ESP32 (mobile app / base station)
+                  // Includes: state, GPS position + quality, motor speeds, heading, pitch, dispersion rates, temperature, proximity
+                  LoRA_SendTelemetry(RobotSM_Current(&g_sm),
+                                     gps->latitude_deg, gps->longitude_deg, gps->has_fix,
+                                     gps_num_sat, gps_hdop,
+                                     m1_speed, m2_speed,
+                                     g_hf.yaw_deg, g_hf.pitch_deg,
+                                     salt_rate, brine_rate, imu_temp,
+                                     prox_left_cm, prox_right_cm);
+
+                  const char *lora_tx_payload = LoRA_GetLastTxPayload();
+                  if (lora_tx_payload && lora_tx_payload[0] != '\0') {
+                    printf(ANSI_YELLOW "[MAIN] LoRa TX: " ANSI_RESET "%s", lora_tx_payload);
+                  }
+              }
               
               // Debug: Log comprehensive state with ANSI colors
               // Format proximity as "XXcm" or "NO_DETECT"
@@ -482,10 +657,6 @@ int main(void)
                      salt_rate, brine_rate, imu_temp,
                      prox_left_str, prox_right_str);
 
-                  const char *lora_tx_payload = LoRA_GetLastTxPayload();
-                  if (lora_tx_payload && lora_tx_payload[0] != '\0') {
-                    printf(ANSI_YELLOW "[MAIN] LoRa TX: " ANSI_RESET "%s", lora_tx_payload);
-                  }
           }
       }  /* Close the 50 Hz if block */
   }  /* Close the while(1) loop */

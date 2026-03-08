@@ -8,7 +8,16 @@
 extern "C" {
 #endif
 
-// Initialize LoRA UART interface (UART5, 9600 baud)
+typedef enum {
+    LORA_MANUAL_CMD_NONE = 0,
+    LORA_MANUAL_CMD_FORWARD,
+    LORA_MANUAL_CMD_BACK,
+    LORA_MANUAL_CMD_LEFT,
+    LORA_MANUAL_CMD_RIGHT,
+    LORA_MANUAL_CMD_STOP
+} LoRA_ManualCommand_t;
+
+// Initialize LoRA UART interface (UART5, 115200 baud)
 void LoRA_Init(UART_HandleTypeDef *huart5);
 
 // Process incoming byte from UART 5 RX (call from ISR)
@@ -51,6 +60,10 @@ void LoRA_SendFault(uint8_t fault_code, uint8_t action);
 // Returns: 1 if command valid, 0 if invalid
 // Sets *out_state to requested state if valid command received
 uint8_t LoRA_GetPendingCommand(uint8_t *out_state);
+
+// Get pending manual drive command from LoRa text/JSON command input
+// Returns: 1 if command available, 0 otherwise
+uint8_t LoRA_GetPendingManualCommand(LoRA_ManualCommand_t *out_cmd);
 
 // Get last command for debugging
 const char* LoRA_GetLastCommand(void);

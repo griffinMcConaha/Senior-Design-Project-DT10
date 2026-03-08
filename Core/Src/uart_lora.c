@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 
 // ============================================================================
 // LoRA UART COMMUNICATION MODULE (UART 5)
@@ -11,9 +12,9 @@
 // Sends diagnostic data back to base station
 // ============================================================================
 
-#define LORA_RX_BUFFER_SIZE 128
+#define LORA_RX_BUFFER_SIZE 256
 #define LORA_COMMAND_TIMEOUT_MS 5000
-#define LORA_STREAM_BUFFER_SIZE 256
+#define LORA_STREAM_BUFFER_SIZE 512
 #define LORA_TX_DIAGNOSTICS_ENABLED 1
 
 typedef struct {
@@ -28,9 +29,11 @@ typedef struct {
     uint32_t last_tx_ms;  // Track last successful transmission for health monitoring
     uint32_t rx_count;
     uint32_t tx_count;
-    char last_command[64];
+    char last_command[128];
     char last_tx_payload[320];
     uint8_t pending_state_request; // 0=none, else state value
+    LoRA_ManualCommand_t pending_manual_cmd;
+    uint8_t manual_command_valid;
     uint8_t command_valid;
     uint8_t stream_seq_init;
     uint32_t stream_expected_seq;
@@ -41,6 +44,149 @@ typedef struct {
 
 static LoRA_State_t lora_state = {0};
 static uint8_t s_lora_verbose = 0;
+
+static uint8_t lora_parse_state_request(const char *cmd, uint8_t *out_state)
+{
+    if (!cmd || !out_state) return 0;
+
+    char normalized[64];
+    size_t in_len = strlen(cmd);
+    if (in_len >= sizeof(normalized)) {
+        in_len = sizeof(normalized) - 1;
+    }
+
+    memcpy(normalized, cmd, in_len);
+    normalized[in_len] = '\0';
+
+    // Trim leading/trailing whitespace
+    char *start = normalized;
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+
+    char *end = start + strlen(start);
+    while (end > start && isspace((unsigned char)*(end - 1))) {
+        end--;
+    }
+    *end = '\0';
+
+    // Normalize case for robust matching
+    for (char *p = start; *p != '\0'; ++p) {
+        *p = (char)toupper((unsigned char)*p);
+    }
+
+    // Accept optional "CMD:" prefix
+    const char *payload = start;
+    if (strncmp(payload, "CMD:", 4) == 0) {
+        payload += 4;
+    }
+
+    // Strip optional parameter section (e.g. AUTO,SALT:20)
+    char *comma = strchr((char *)payload, ',');
+    if (comma) {
+        *comma = '\0';
+    }
+
+    if (strcmp(payload, "AUTO") == 0) {
+        *out_state = 1; // STATE_AUTO
+        return 1;
+    }
+    if (strcmp(payload, "MANUAL") == 0) {
+        *out_state = 0; // STATE_MANUAL
+        return 1;
+    }
+    if (strcmp(payload, "PAUSE") == 0) {
+        *out_state = 2; // STATE_PAUSE
+        return 1;
+    }
+    if (strcmp(payload, "ESTOP") == 0 || strcmp(payload, "STOP") == 0) {
+        *out_state = 4; // STATE_ESTOP
+        return 1;
+    }
+
+    return 0;
+}
+
+static uint8_t lora_parse_manual_request(const char *cmd, LoRA_ManualCommand_t *out_cmd)
+{
+    if (!cmd || !out_cmd) return 0;
+
+    char normalized[80];
+    size_t in_len = strlen(cmd);
+    if (in_len >= sizeof(normalized)) {
+        in_len = sizeof(normalized) - 1;
+    }
+
+    memcpy(normalized, cmd, in_len);
+    normalized[in_len] = '\0';
+
+    char *start = normalized;
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+
+    char *end = start + strlen(start);
+    while (end > start && isspace((unsigned char)*(end - 1))) {
+        end--;
+    }
+    *end = '\0';
+
+    for (char *p = start; *p != '\0'; ++p) {
+        *p = (char)toupper((unsigned char)*p);
+    }
+
+    const char *payload = start;
+    if (strncmp(payload, "CMD:", 4) == 0) {
+        payload += 4;
+    }
+
+    if (strcmp(payload, "FORWARD") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_FORWARD;
+        return 1;
+    }
+    if (strcmp(payload, "BACK") == 0 || strcmp(payload, "BACKWARD") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_BACK;
+        return 1;
+    }
+    if (strcmp(payload, "LEFT") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_LEFT;
+        return 1;
+    }
+    if (strcmp(payload, "RIGHT") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_RIGHT;
+        return 1;
+    }
+    if (strcmp(payload, "STOP") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_STOP;
+        return 1;
+    }
+
+    // Basic JSON compatibility for upcoming app payloads
+    if (payload[0] == '{') {
+        if (strstr(payload, "FORWARD") != NULL) {
+            *out_cmd = LORA_MANUAL_CMD_FORWARD;
+            return 1;
+        }
+        if (strstr(payload, "BACKWARD") != NULL || strstr(payload, "BACK") != NULL) {
+            *out_cmd = LORA_MANUAL_CMD_BACK;
+            return 1;
+        }
+        if (strstr(payload, "LEFT") != NULL) {
+            *out_cmd = LORA_MANUAL_CMD_LEFT;
+            return 1;
+        }
+        if (strstr(payload, "RIGHT") != NULL) {
+            *out_cmd = LORA_MANUAL_CMD_RIGHT;
+            return 1;
+        }
+        if (strstr(payload, "STOP") != NULL) {
+            *out_cmd = LORA_MANUAL_CMD_STOP;
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 static void lora_uart5_send(const char *msg, const char *tag)
 {
@@ -104,6 +250,8 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.rx_count = 0;
     lora_state.tx_count = 0;
     lora_state.pending_state_request = 0;
+    lora_state.pending_manual_cmd = LORA_MANUAL_CMD_NONE;
+    lora_state.manual_command_valid = 0;
     lora_state.stream_seq_init = 0;
     lora_state.stream_expected_seq = 0;
     lora_state.stream_gap_count = 0;
@@ -151,6 +299,7 @@ void LoRA_RxByte(uint8_t byte)
 
             // Parse command
             lora_state.command_valid = 0;
+            lora_state.manual_command_valid = 0;
             uint32_t stream_seq = 0;
             uint8_t has_stream_seq = 0;
             const char *cmd = lora_unwrap_stream_frame((char *)lora_state.rx_buffer, &stream_seq, &has_stream_seq);
@@ -206,48 +355,22 @@ void LoRA_RxByte(uint8_t byte)
                 }
             }
 
-            // CMD:AUTO[,SALT:XX,BRINE:XX]
-            if (strncmp(cmd, "CMD:AUTO", 8) == 0)
+            if (lora_parse_state_request(cmd, &lora_state.pending_state_request))
             {
-                lora_state.pending_state_request = 1; // STATE_AUTO
                 lora_state.command_valid = 1;
                 strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
                 lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
                 if (s_lora_verbose) {
-                    printf("[LORA] Valid command: AUTO\r\n");
+                    printf("[LORA] Valid command: %s -> state=%u\r\n", cmd, lora_state.pending_state_request);
                 }
             }
-            // CMD:MANUAL
-            else if (strcmp(cmd, "CMD:MANUAL") == 0)
+            else if (lora_parse_manual_request(cmd, &lora_state.pending_manual_cmd))
             {
-                lora_state.pending_state_request = 0; // STATE_MANUAL
-                lora_state.command_valid = 1;
+                lora_state.manual_command_valid = 1;
                 strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
                 lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
                 if (s_lora_verbose) {
-                    printf("[LORA] Valid command: MANUAL\r\n");
-                }
-            }
-            // CMD:PAUSE
-            else if (strcmp(cmd, "CMD:PAUSE") == 0)
-            {
-                lora_state.pending_state_request = 2; // STATE_PAUSE
-                lora_state.command_valid = 1;
-                strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
-                lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
-                if (s_lora_verbose) {
-                    printf("[LORA] Valid command: PAUSE\r\n");
-                }
-            }
-            // CMD:ESTOP
-            else if (strcmp(cmd, "CMD:ESTOP") == 0)
-            {
-                lora_state.pending_state_request = 4; // STATE_ESTOP
-                lora_state.command_valid = 1;
-                strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
-                lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
-                if (s_lora_verbose) {
-                    printf("[LORA] Valid command: ESTOP\r\n");
+                    printf("[LORA] Valid manual command: %s -> cmd=%u\r\n", cmd, (unsigned)lora_state.pending_manual_cmd);
                 }
             }
             else
@@ -273,9 +396,9 @@ void LoRA_RxByte(uint8_t byte)
         lora_state.raw_index = 0;
     }
 
-    // Only accept LoRa control frames that start with "CMD:"
+    // Accept control frames that start with CMD:/stream wrappers or bare state words
     if (lora_state.rx_index == 0) {
-        if (byte != 'C' && byte != 'S') {
+        if (byte != 'C' && byte != 'S' && byte != 'A' && byte != 'M' && byte != 'P' && byte != 'E' && byte != 'a' && byte != 'm' && byte != 'p' && byte != 'e') {
             return;
         }
     } else if (lora_state.rx_buffer[0] == 'C') {
@@ -454,6 +577,20 @@ uint8_t LoRA_GetPendingCommand(uint8_t *out_state)
     {
         *out_state = lora_state.pending_state_request;
         lora_state.command_valid = 0;
+        return 1;
+    }
+
+    return 0;
+}
+
+uint8_t LoRA_GetPendingManualCommand(LoRA_ManualCommand_t *out_cmd)
+{
+    if (!out_cmd) return 0;
+
+    if (lora_state.manual_command_valid)
+    {
+        *out_cmd = lora_state.pending_manual_cmd;
+        lora_state.manual_command_valid = 0;
         return 1;
     }
 
