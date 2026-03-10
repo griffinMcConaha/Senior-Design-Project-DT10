@@ -12,8 +12,8 @@ extern "C" {
 // Also initializes UART 4 communication with dispersion ESP32
 void Dispersion_Init(UART_HandleTypeDef *huart4);
 
-// Set dispersion rates with automatic 1:9 ratio enforcement
-// salt_rate: 0-100 (percent output), brine_rate: auto-adjusted to maintain 1:9 ratio
+// Set dispersion rates as direct pass-through percentages
+// salt_rate: 0-100 (percent output), brine_rate: 0-100 (percent output)
 // Sends command to dispersion ESP32 via UART 4: SALT:XX,BRINE:XX\r\n
 void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate);
 
@@ -39,7 +39,7 @@ float Dispersion_ReadRPM(void);
 // Process incoming byte from UART 4 RX (call from ISR)
 void Dispersion_RxByte(uint8_t byte);
 
-// Dispersion control task - monitors flows, enforces ratios, processes UART responses
+// Dispersion task - monitors flows and processes UART responses (no automatic rate control)
 // Call periodically (e.g., every 50ms main loop iteration)
 void Dispersion_Task(void);
 
