@@ -67,6 +67,10 @@ static uint8_t s_imu_addr = 0x69 << 1;  // Default to 0x69, can change to 0x68
 #define GYRO_SCALE  (1.0f / 131.0f)        // ±250 dps => 131 LSB/(°/s)
 #define MAG_SCALE   (0.15f)                // µT per LSB (approx; if used)
 
+// Optional temperature trim (disabled by default)
+#define IMU_TEMP_OFFSET_ENABLE 0
+#define IMU_TEMP_OFFSET_C      0.0f
+
 // I2C timeout (ms) to avoid long stalls on bus errors
 #define I2C_TIMEOUT_MS 20
 
@@ -210,7 +214,11 @@ static HAL_StatusTypeDef ICM20948_ReadTemp(float *temp_c)
     
     // Temperature formula from datasheet:
     // Temp (°C) = (TEMP_OUT / 333.87) + 21.0
-    *temp_c = (raw_temp / 333.87f) + 21.0f;
+    float temp = (raw_temp / 333.87f) + 21.0f;
+#if IMU_TEMP_OFFSET_ENABLE
+    temp += IMU_TEMP_OFFSET_C;
+#endif
+    *temp_c = temp;
     return HAL_OK;
 }
 
@@ -354,7 +362,7 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
     status = IMU_I2C_Write(PWR_MGMT_1, 0x80);
     if (status != HAL_OK) {
         printf(ANSI_RED "[IMU] CRITICAL: Reset command failed (error: %d)\r\n" ANSI_RESET, status);
-        printf(ANSI_YELLOW "[IMU] Check I2C wiring: SDA=PB9, SCL=PB6, VCC=3.3V, GND\r\n" ANSI_RESET);
+        printf(ANSI_YELLOW "[IMU] Check I2C wiring: SDA=PB9, SCL=PB8, VCC=3.3V, GND\r\n" ANSI_RESET);
         return;
     }
     HAL_Delay(100);
@@ -364,7 +372,7 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
     status = IMU_I2C_Write(PWR_MGMT_1, 0x01);
     if (status != HAL_OK) {
         printf(ANSI_RED "[IMU] CRITICAL: Wake command failed (error: %d)\r\n" ANSI_RESET, status);
-        printf(ANSI_YELLOW "[IMU] Check I2C wiring: SDA=PB9, SCL=PB6, VCC=3.3V, GND\r\n" ANSI_RESET);
+        printf(ANSI_YELLOW "[IMU] Check I2C wiring: SDA=PB9, SCL=PB8, VCC=3.3V, GND\r\n" ANSI_RESET);
         return;
     }
     HAL_Delay(10);

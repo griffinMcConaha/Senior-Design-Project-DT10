@@ -447,7 +447,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             // Clear console multiple times to ensure clean state
             printf("\033[2J\033[H");
             fflush(stdout);
-            HAL_Delay(100);
+            HAL_Delay(1000);
             printf(ANSI_GREEN "Exiting test mode. Resuming normal operation.\r\n" ANSI_RESET);
             fflush(stdout);
         } else {
