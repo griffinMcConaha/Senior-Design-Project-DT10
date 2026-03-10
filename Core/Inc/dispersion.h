@@ -51,6 +51,7 @@ uint32_t Dispersion_GetLastTxMs(void);
 uint32_t Dispersion_GetLastRxMs(void);
 uint32_t Dispersion_GetTxCount(void);
 uint32_t Dispersion_GetRxCount(void);
+uint32_t Dispersion_GetRawRxByteCount(void);
 
 // Enable/disable verbose ESP response prints for salt/brine test modes
 void Dispersion_SetTestResponseMode(uint8_t enable);

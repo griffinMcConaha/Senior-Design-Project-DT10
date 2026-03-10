@@ -202,8 +202,8 @@ void Diag_TestSaltRate(uint8_t rate_percent)
     // Enable detailed ESP responses only during active salt test
     Dispersion_SetTestResponseMode(1);
 
-    // Send percentage-only payload; ESP32-SB handles mapping logic
-    Dispersion_SendPercentOnly(rate_percent);
+    // Send explicit framed command for deterministic ESP parser handling
+    Dispersion_SetRateDirect(rate_percent, 0);
 
     printf(ANSI_GREEN "[DIAG] Salt Rate %d%% applied\r\n" ANSI_RESET, rate_percent);
     printf(ANSI_CYAN "[DIAG] Press ESC to stop and reset to 0%%\r\n\r\n" ANSI_RESET);
@@ -225,7 +225,7 @@ void Diag_TestSaltRate(uint8_t rate_percent)
     }
 
     // Reset to 0
-    Dispersion_SendPercentOnly(0);
+    Dispersion_SetRateDirect(0, 0);
     Dispersion_SetTestResponseMode(0);
     printf("\r\n" ANSI_GREEN "[DIAG] Salt rate reset to 0%%\r\n\r\n" ANSI_RESET);
     Console_ShowTestMenu();
@@ -285,8 +285,8 @@ void Diag_TestBrineRate(uint8_t rate_percent)
     // Enable detailed ESP responses only during active brine test
     Dispersion_SetTestResponseMode(1);
 
-        // Send percentage-only payload; ESP32-SB handles mapping logic
-        Dispersion_SendPercentOnly(rate_percent);
+        // Send explicit framed command for deterministic ESP parser handling
+        Dispersion_SetRateDirect(0, rate_percent);
 
         printf(ANSI_GREEN "[DIAG] Brine Rate %d%% applied\r\n" ANSI_RESET,
             rate_percent);
@@ -309,7 +309,7 @@ void Diag_TestBrineRate(uint8_t rate_percent)
     }
 
     // Reset to 0
-    Dispersion_SendPercentOnly(0);
+    Dispersion_SetRateDirect(0, 0);
     Dispersion_SetTestResponseMode(0);
     printf("\r\n" ANSI_GREEN "[DIAG] Brine rate reset to 0%%\r\n\r\n" ANSI_RESET);
     Console_ShowTestMenu();

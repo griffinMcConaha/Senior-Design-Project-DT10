@@ -272,6 +272,27 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+  void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+  {
+    if (!huart) return;
+
+    uint32_t err = HAL_UART_GetError(huart);
+
+    if (huart->Instance == UART4) {
+      if (err != HAL_UART_ERROR_NONE) {
+        printf("[UART4] ERROR: 0x%08lX, rearming RX\r\n", err);
+      }
+      __HAL_UART_CLEAR_OREFLAG(&huart4);
+      HAL_UART_Receive_IT(&huart4, &s_disp_uart4_rx_byte, 1);
+    } else if (huart->Instance == UART5) {
+      if (err != HAL_UART_ERROR_NONE) {
+        printf("[UART5] ERROR: 0x%08lX, rearming RX\r\n", err);
+      }
+      __HAL_UART_CLEAR_OREFLAG(&huart5);
+      HAL_UART_Receive_IT(&huart5, &s_lora_uart5_rx_byte, 1);
+    }
+  }
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
     if (GPIO_Pin == B1_Pin)   // CubeMX-defined user button pin

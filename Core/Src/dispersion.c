@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
 
 // ============================================================================
 // SALT AND BRINE DISPERSION CONTROL (PHASE 4)
@@ -21,6 +22,7 @@ typedef struct {
     float rpm_feedback;         // Last RPM feedback from ESP32
     uint8_t rx_buffer[DISP_RX_BUFFER_SIZE];
     uint16_t rx_index;
+    uint8_t rx_discard_until_eol;
     char last_status[64];
     uint32_t clog_timeout_ticks;// Ticks until clog detection timeout
     uint8_t verbose_test_responses; // 1=print ESP responses for test salt/brine modes
@@ -28,6 +30,7 @@ typedef struct {
     uint32_t last_rx_ms;
     uint32_t tx_count;
     uint32_t rx_count;
+    uint32_t raw_rx_byte_count;
 } Dispersion_State_t;
 
 static Dispersion_State_t disp_state = {0};
@@ -48,6 +51,7 @@ void Dispersion_Init(UART_HandleTypeDef *huart4)
     disp_state.brine_flow_mlmin = 0;
     disp_state.rpm_feedback = 0.0f;
     disp_state.rx_index = 0;
+    disp_state.rx_discard_until_eol = 0;
     memset(disp_state.rx_buffer, 0, DISP_RX_BUFFER_SIZE);
     memset(disp_state.last_status, 0, sizeof(disp_state.last_status));
     disp_state.verbose_test_responses = 0;
@@ -55,6 +59,7 @@ void Dispersion_Init(UART_HandleTypeDef *huart4)
     disp_state.last_rx_ms = 0;
     disp_state.tx_count = 0;
     disp_state.rx_count = 0;
+    disp_state.raw_rx_byte_count = 0;
     
     printf("[DISP] Dispersion system initialized (UART 4 at 9600 baud)\r\n");
 }
@@ -82,9 +87,14 @@ void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate)
     
     if (disp_state.huart)
     {
-        HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
-        disp_state.last_tx_ms = HAL_GetTick();
-        disp_state.tx_count++;
+        HAL_StatusTypeDef tx_status = HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+        if (tx_status == HAL_OK) {
+            disp_state.last_tx_ms = HAL_GetTick();
+            disp_state.tx_count++;
+            printf("[DISP] TX CMD: %s", cmd);
+        } else {
+            printf("[DISP] UART4 TX failed (SetRate), status=%d\r\n", (int)tx_status);
+        }
     }
 
     // TODO: Send PWM commands to salt auger and brine pump
@@ -114,9 +124,14 @@ void Dispersion_SetRateDirect(uint8_t salt_rate, uint8_t brine_rate)
 
     if (disp_state.huart)
     {
-        HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
-        disp_state.last_tx_ms = HAL_GetTick();
-        disp_state.tx_count++;
+        HAL_StatusTypeDef tx_status = HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+        if (tx_status == HAL_OK) {
+            disp_state.last_tx_ms = HAL_GetTick();
+            disp_state.tx_count++;
+            printf("[DISP] TX CMD: %s", cmd);
+        } else {
+            printf("[DISP] UART4 TX failed (SetRateDirect), status=%d\r\n", (int)tx_status);
+        }
     }
 
     printf("[DISP] Direct test rates: salt=%d%%, brine=%d%%\r\n",
@@ -134,9 +149,14 @@ void Dispersion_SendPercentOnly(uint8_t percent)
     {
         char cmd[8];
         int len = snprintf(cmd, sizeof(cmd), "%u\r\n", percent);
-        HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, (uint16_t)len, HAL_MAX_DELAY);
-        disp_state.last_tx_ms = HAL_GetTick();
-        disp_state.tx_count++;
+        HAL_StatusTypeDef tx_status = HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, (uint16_t)len, HAL_MAX_DELAY);
+        if (tx_status == HAL_OK) {
+            disp_state.last_tx_ms = HAL_GetTick();
+            disp_state.tx_count++;
+            printf("[DISP] TX CMD: %s", cmd);
+        } else {
+            printf("[DISP] UART4 TX failed (SendPercentOnly), status=%d\r\n", (int)tx_status);
+        }
     }
 
     printf("[DISP] Percent-only test send: %u%%\r\n", percent);
@@ -165,10 +185,14 @@ void Dispersion_SendRaw(const char *text)
             cmd[in_len] = '\0';
         }
 
-        HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, (uint16_t)in_len, HAL_MAX_DELAY);
-        disp_state.last_tx_ms = HAL_GetTick();
-        disp_state.tx_count++;
-        printf("[DISP] Raw TX: %s", cmd);
+        HAL_StatusTypeDef tx_status = HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, (uint16_t)in_len, HAL_MAX_DELAY);
+        if (tx_status == HAL_OK) {
+            disp_state.last_tx_ms = HAL_GetTick();
+            disp_state.tx_count++;
+            printf("[DISP] Raw TX: %s", cmd);
+        } else {
+            printf("[DISP] UART4 TX failed (SendRaw), status=%d\r\n", (int)tx_status);
+        }
     }
 }
 
@@ -205,60 +229,76 @@ void Dispersion_RxByte(uint8_t byte)
 {
     if (!disp_state.initialized) return;
 
+    disp_state.raw_rx_byte_count++;
+
+    // Ignore NUL and other non-printable control noise bytes (except CR/LF)
+    if (byte != '\r' && byte != '\n' && !isprint((int)byte)) {
+        return;
+    }
+
     // Check for line ending (CR or LF)
     if (byte == '\r' || byte == '\n')
     {
+        // End overflow-discard mode once line terminates
+        if (disp_state.rx_discard_until_eol)
+        {
+            disp_state.rx_discard_until_eol = 0;
+            disp_state.rx_index = 0;
+            return;
+        }
+
         // Process complete message
         if (disp_state.rx_index > 0)
         {
             disp_state.rx_buffer[disp_state.rx_index] = '\0';
 
-            // Copy to last_status for debugging
-            strncpy(disp_state.last_status, (const char *)disp_state.rx_buffer,
-                    sizeof(disp_state.last_status) - 1);
-            disp_state.last_status[sizeof(disp_state.last_status) - 1] = '\0';
-            disp_state.last_rx_ms = HAL_GetTick();
-            disp_state.rx_count++;
-
-            if (disp_state.verbose_test_responses) {
-                printf("[DISP] ESP32 Response: %s\r\n", disp_state.rx_buffer);
+            char *line = (char *)disp_state.rx_buffer;
+            while (*line && isspace((unsigned char)*line)) {
+                line++;
             }
 
-            // Parse response
-            const char *resp = (const char *)disp_state.rx_buffer;
+            char *line_end = line + strlen(line);
+            while (line_end > line && isspace((unsigned char)line_end[-1])) {
+                line_end--;
+            }
+            *line_end = '\0';
 
-            // STATUS:OK
-            if (strcmp(resp, "STATUS:OK") == 0)
-            {
-                if (disp_state.verbose_test_responses) {
-                    printf("[DISP] Dispersion OK\r\n");
+            if (line[0] != '\0') {
+                const char *resp = line;
+                const char *known_prefix = strstr(line, "STATUS:");
+                if (!known_prefix) known_prefix = strstr(line, "FLOW:");
+                if (!known_prefix) {
+                    // Ignore malformed/noise lines so RX health reflects only valid ESP frames.
+                    disp_state.rx_index = 0;
+                    return;
                 }
-            }
-            // STATUS:ERROR,CLOG
-            else if (strstr(resp, "STATUS:ERROR") != NULL)
-            {
-                if (disp_state.verbose_test_responses) {
-                    printf("[DISP] ERROR from ESP32: %s\r\n", resp);
-                }
-                // TODO: Set fault code FAULT_DISPERSION_CLOG
-            }
-            // FLOW:SALT:XXX,BRINE:XXXX
-            else if (strstr(resp, "FLOW:") != NULL)
-            {
-                uint16_t salt_flow = 0, brine_flow = 0;
-                float rpm = disp_state.rpm_feedback;
-                int parsed = sscanf(resp, "FLOW:SALT:%hu,BRINE:%hu,RPM:%f", &salt_flow, &brine_flow, &rpm);
-                if (parsed >= 2)
+                resp = known_prefix;
+
+                strncpy(disp_state.last_status, resp, sizeof(disp_state.last_status) - 1);
+                disp_state.last_status[sizeof(disp_state.last_status) - 1] = '\0';
+                disp_state.last_rx_ms = HAL_GetTick();
+                disp_state.rx_count++;
+
+                if (strncmp(resp, "STATUS:OK", 9) == 0)
                 {
-                    disp_state.salt_flow_mlmin = salt_flow;
-                    disp_state.brine_flow_mlmin = brine_flow;
-                    if (parsed == 3)
+                }
+                else if (strncmp(resp, "STATUS:ERROR", 12) == 0)
+                {
+                    // TODO: Set fault code FAULT_DISPERSION_CLOG
+                }
+                else if (strstr(resp, "FLOW:") != NULL)
+                {
+                    uint16_t salt_flow = 0, brine_flow = 0;
+                    float rpm = disp_state.rpm_feedback;
+                    int parsed = sscanf(resp, "FLOW:SALT:%hu,BRINE:%hu,RPM:%f", &salt_flow, &brine_flow, &rpm);
+                    if (parsed >= 2)
                     {
-                        disp_state.rpm_feedback = rpm;
-                    }
-                    if (disp_state.verbose_test_responses) {
-                        printf("[DISP] Flow updated: Salt=%d mL/min, Brine=%d mL/min, RPM=%.1f\r\n",
-                               salt_flow, brine_flow, disp_state.rpm_feedback);
+                        disp_state.salt_flow_mlmin = salt_flow;
+                        disp_state.brine_flow_mlmin = brine_flow;
+                        if (parsed == 3)
+                        {
+                            disp_state.rpm_feedback = rpm;
+                        }
                     }
                 }
             }
@@ -269,6 +309,12 @@ void Dispersion_RxByte(uint8_t byte)
         return;
     }
 
+    // If prior overflow happened, discard until end-of-line
+    if (disp_state.rx_discard_until_eol)
+    {
+        return;
+    }
+
     // Add byte to buffer
     if (disp_state.rx_index < (DISP_RX_BUFFER_SIZE - 1))
     {
@@ -276,8 +322,9 @@ void Dispersion_RxByte(uint8_t byte)
     }
     else
     {
-        // Buffer overflow - reset
-        printf("[DISP] RX buffer overflow, resetting\r\n");
+        // Buffer overflow - discard remainder of this line until EOL
+        printf("[DISP] RX line overflow, discarding until newline\r\n");
+        disp_state.rx_discard_until_eol = 1;
         disp_state.rx_index = 0;
     }
 }
@@ -341,6 +388,11 @@ uint32_t Dispersion_GetTxCount(void)
 uint32_t Dispersion_GetRxCount(void)
 {
     return disp_state.rx_count;
+}
+
+uint32_t Dispersion_GetRawRxByteCount(void)
+{
+    return disp_state.raw_rx_byte_count;
 }
 
 void Dispersion_SetTestResponseMode(uint8_t enable)

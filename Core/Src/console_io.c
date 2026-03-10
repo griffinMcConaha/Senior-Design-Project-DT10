@@ -102,7 +102,6 @@ void Console_PrintStatus(const ConsoleIO_t *c,
 {
     (void)c;
     if (!imu || !gps || !hf) return;
-
     uint32_t now_ms = HAL_GetTick();
     uint32_t disp_last_tx = Dispersion_GetLastTxMs();
     uint32_t disp_last_rx = Dispersion_GetLastRxMs();
@@ -113,6 +112,9 @@ void Console_PrintStatus(const ConsoleIO_t *c,
     uint32_t disp_rx_age = disp_last_rx ? (now_ms - disp_last_rx) : 0xFFFFFFFFu;
     uint32_t lora_tx_age = lora_last_tx ? (now_ms - lora_last_tx) : 0xFFFFFFFFu;
     uint32_t lora_rx_age = lora_last_rx ? (now_ms - lora_last_rx) : 0xFFFFFFFFu;
+
+    const uint32_t disp_tx_stale_ms = 5000u;
+    const uint32_t disp_rx_stale_ms = 30000u;
 
     uint32_t disp_tx_count = Dispersion_GetTxCount();
     uint32_t disp_rx_count = Dispersion_GetRxCount();
@@ -185,9 +187,9 @@ void Console_PrintStatus(const ConsoleIO_t *c,
         printf(ANSI_CYAN "ESP32 SB Link: " ANSI_RESET
             "TX[%c] %s  RX[%c] %s\r\n",
             disp_tx_hb,
-            (disp_tx_age == 0xFFFFFFFFu) ? "--" : (disp_tx_age < 3000u ? "OK" : "STALE"),
+            (disp_tx_age == 0xFFFFFFFFu) ? "--" : (disp_tx_age < disp_tx_stale_ms ? "OK" : "STALE"),
             disp_rx_hb,
-            (disp_rx_age == 0xFFFFFFFFu) ? "--" : (disp_rx_age < 10000u ? "OK" : "STALE"));
+            (disp_rx_age == 0xFFFFFFFFu) ? "--" : (disp_rx_age < disp_rx_stale_ms ? "OK" : "STALE"));
 
         printf(ANSI_CYAN "ESP32 LoRa Link: " ANSI_RESET
             "TX[%c] %s  RX[%c] %s\r\n",
@@ -325,6 +327,36 @@ static int Console_IsMostlyPrintableAscii(const char *s)
 
     // Require at least 85% printable bytes
     return (printable * 100u) >= (85u * total);
+}
+
+static void Console_NormalizeSbEspCommand(const char *input, char *output, size_t output_size)
+{
+    if (!output || output_size < 2) return;
+
+    output[0] = '\0';
+    if (!input || input[0] == '\0') return;
+
+    int first = 0;
+    int second = 0;
+
+    char upper[160] = {0};
+    size_t len = strnlen(input, sizeof(upper) - 1);
+    for (size_t i = 0; i < len; i++) {
+        upper[i] = (char)toupper((unsigned char)input[i]);
+    }
+    upper[len] = '\0';
+
+    if (strstr(upper, "SALT") && strstr(upper, "BRINE") && ParseTwoInts(input, &first, &second)) {
+        if (first < 0) first = 0;
+        if (first > 100) first = 100;
+        if (second < 0) second = 0;
+        if (second > 100) second = 100;
+        snprintf(output, output_size, "SALT:%d,BRINE:%d", first, second);
+        return;
+    }
+
+    strncpy(output, input, output_size - 1);
+    output[output_size - 1] = '\0';
 }
 
 void Console_ShowTestMenu(void)
@@ -620,27 +652,27 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     if (strcmp(cmd_upper, "L") == 0)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
-        char lora_text[160] = {0};
         printf(ANSI_CYAN "\r\n[DIAG] ===== LoRa SEND MENU =====\r\n" ANSI_RESET);
         printf("[DIAG] Type text and press ENTER to send over UART5\r\n");
-        printf("[DIAG] Press ESC to cancel and return\r\n");
+        printf("[DIAG] Press ESC to exit this send menu\r\n");
         printf("[DIAG] Example: PING or HELLO\r\n\r\n");
-        if (!Console_ReadLineBlocking("[DIAG] Enter LoRa text to send (ESC to cancel): ", lora_text, sizeof(lora_text))) {
-            Console_ShowTestMenu();
-            return;
-        }
-        if (lora_text[0] == '\0') {
-            printf("[DIAG] Empty input, nothing sent\r\n");
-            Console_ShowTestMenu();
-            return;
-        }
-        uint32_t tx_before = LoRA_GetTxCount();
-        LoRA_SendRaw(lora_text);
-        uint32_t tx_after = LoRA_GetTxCount();
-        if (tx_after > tx_before) {
-            printf("[DIAG] LoRa TX OK: %s\r\n", lora_text);
-        } else {
-            printf("[DIAG] LoRa TX FAILED (UART5 not ready?)\r\n");
+        while (1) {
+            char lora_text[160] = {0};
+            if (!Console_ReadLineBlocking("[DIAG] Enter LoRa text to send (ESC to exit): ", lora_text, sizeof(lora_text))) {
+                break;
+            }
+            if (lora_text[0] == '\0') {
+                printf("[DIAG] Empty input, nothing sent\r\n");
+                continue;
+            }
+            uint32_t tx_before = LoRA_GetTxCount();
+            LoRA_SendRaw(lora_text);
+            uint32_t tx_after = LoRA_GetTxCount();
+            if (tx_after > tx_before) {
+                printf("[DIAG] LoRa TX OK: %s\r\n", lora_text);
+            } else {
+                printf("[DIAG] LoRa TX FAILED (UART5 not ready?)\r\n");
+            }
         }
         Console_ShowTestMenu();
         return;
@@ -696,36 +728,46 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     if (strcmp(cmd_upper, "E") == 0)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
-        char sb_text[160] = {0};
         printf(ANSI_CYAN "\r\n[DIAG] ===== SB-ESP SEND MENU =====\r\n" ANSI_RESET);
         printf("[DIAG] Type text and press ENTER to send over UART4\r\n");
-        printf("[DIAG] Press ESC to cancel and return\r\n");
+        printf("[DIAG] Press ESC to exit this send menu\r\n");
         printf("[DIAG] Example: PING or SALT:25,BRINE:75\r\n\r\n");
-        if (!Console_ReadLineBlocking("[DIAG] Enter SB-ESP text to send (ESC to cancel): ", sb_text, sizeof(sb_text))) {
-            Console_ShowTestMenu();
-            return;
-        }
-        if (sb_text[0] == '\0') {
-            printf("[DIAG] Empty input, nothing sent\r\n");
-            Console_ShowTestMenu();
-            return;
-        }
+        while (1) {
+            char sb_text[160] = {0};
+            if (!Console_ReadLineBlocking("[DIAG] Enter SB-ESP text to send (ESC to exit): ", sb_text, sizeof(sb_text))) {
+                break;
+            }
+            if (sb_text[0] == '\0') {
+                printf("[DIAG] Empty input, nothing sent\r\n");
+                continue;
+            }
 
-        const char *before = Dispersion_GetLastStatus();
-        char before_buf[64] = {0};
-        if (before) {
-            strncpy(before_buf, before, sizeof(before_buf) - 1);
-            before_buf[sizeof(before_buf) - 1] = '\0';
-        }
+            const char *before = Dispersion_GetLastStatus();
+            char before_buf[64] = {0};
+            if (before) {
+                strncpy(before_buf, before, sizeof(before_buf) - 1);
+                before_buf[sizeof(before_buf) - 1] = '\0';
+            }
 
-        Dispersion_SetTestResponseMode(1);
-        Dispersion_SendRaw(sb_text);
-        HAL_Delay(250);
-        const char *after = Dispersion_GetLastStatus();
-        if (after && strcmp(after, before_buf) != 0) {
-            printf("[DIAG] SB-ESP RX: %s\r\n", after);
-        } else {
-            printf("[DIAG] SB-ESP: no new RX yet (use Q / TEST SBESPRX to monitor)\r\n");
+            char normalized_sb_text[160] = {0};
+            Console_NormalizeSbEspCommand(sb_text, normalized_sb_text, sizeof(normalized_sb_text));
+            if (strcmp(normalized_sb_text, sb_text) != 0) {
+                printf("[DIAG] SB-ESP normalized TX: %s\r\n", normalized_sb_text);
+            }
+
+            Dispersion_SetTestResponseMode(1);
+            Dispersion_SendRaw(normalized_sb_text);
+            HAL_Delay(250);
+            const char *after = Dispersion_GetLastStatus();
+            if (after && strcmp(after, before_buf) != 0) {
+                if ((strncmp(after, "STATUS:", 7) == 0) || (strncmp(after, "FLOW:", 5) == 0)) {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", after);
+                } else {
+                    printf("[DIAG] SB-ESP RX ignored (non-protocol noise/echo): %s\r\n", after);
+                }
+            } else {
+                printf("[DIAG] SB-ESP: no new RX yet (use Q / TEST SBESPRX to monitor)\r\n");
+            }
         }
         Dispersion_SetTestResponseMode(0);
         Console_ShowTestMenu();
@@ -736,7 +778,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
         extern UART_HandleTypeDef huart2;
-        char last_seen[64] = {0};
+        uint32_t last_seen_rx_count = Dispersion_GetRxCount();
+        uint32_t last_wait_print_ms = HAL_GetTick();
         Dispersion_SetTestResponseMode(1);
         printf(ANSI_CYAN "[DIAG] SB-ESP RX monitor active (press ESC to exit)\r\n" ANSI_RESET);
         while (1)
@@ -748,11 +791,29 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             }
             if (Console_CheckEscPressed()) break;
 
-            const char *msg = Dispersion_GetLastStatus();
-            if (msg && msg[0] != '\0' && strcmp(msg, last_seen) != 0) {
-                strncpy(last_seen, msg, sizeof(last_seen) - 1);
-                last_seen[sizeof(last_seen) - 1] = '\0';
-                printf("[DIAG] SB-ESP RX: %s\r\n", last_seen);
+            uint32_t now_ms = HAL_GetTick();
+
+            uint32_t rx_count = Dispersion_GetRxCount();
+            if (rx_count != last_seen_rx_count) {
+                last_seen_rx_count = rx_count;
+                const char *msg = Dispersion_GetLastStatus();
+                if (msg && msg[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX[%lu]: %s\r\n", rx_count, msg);
+                } else {
+                    printf("[DIAG] SB-ESP RX[%lu]: <empty>\r\n", rx_count);
+                }
+                last_wait_print_ms = HAL_GetTick();
+            } else {
+                if ((now_ms - last_wait_print_ms) >= 3000u) {
+                    uint32_t age = Dispersion_GetLastRxMs() ? (now_ms - Dispersion_GetLastRxMs()) : 0xFFFFFFFFu;
+                    uint32_t tx_count = Dispersion_GetTxCount();
+                    if (age == 0xFFFFFFFFu) {
+                        printf("[DIAG] SB-ESP RX waiting... tx=%lu rx=%lu age=--\r\n", tx_count, rx_count);
+                    } else {
+                        printf("[DIAG] SB-ESP RX waiting... tx=%lu rx=%lu age=%lums\r\n", tx_count, rx_count, age);
+                    }
+                    last_wait_print_ms = now_ms;
+                }
             }
 
             HAL_Delay(50);
@@ -993,12 +1054,22 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                     before_buf[sizeof(before_buf) - 1] = '\0';
                 }
 
+                char normalized_sb_text[160] = {0};
+                Console_NormalizeSbEspCommand(subcmd_orig, normalized_sb_text, sizeof(normalized_sb_text));
+                if (strcmp(normalized_sb_text, subcmd_orig) != 0) {
+                    printf("[DIAG] SB-ESP normalized TX: %s\r\n", normalized_sb_text);
+                }
+
                 Dispersion_SetTestResponseMode(1);
-                Dispersion_SendRaw(subcmd_orig);
+                Dispersion_SendRaw(normalized_sb_text);
                 HAL_Delay(250);
                 const char *after = Dispersion_GetLastStatus();
                 if (after && strcmp(after, before_buf) != 0) {
-                    printf("[DIAG] SB-ESP RX: %s\r\n", after);
+                    if ((strncmp(after, "STATUS:", 7) == 0) || (strncmp(after, "FLOW:", 5) == 0)) {
+                        printf("[DIAG] SB-ESP RX: %s\r\n", after);
+                    } else {
+                        printf("[DIAG] SB-ESP RX ignored (non-protocol noise/echo): %s\r\n", after);
+                    }
                 } else {
                     printf("[DIAG] SB-ESP: no new RX yet (use TEST SBESPRX to monitor)\r\n");
                 }
@@ -1011,7 +1082,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         if (strcmp(subcmd_up, "SBESPRX") == 0 || strcmp(subcmd_up, "DISPRX") == 0)
         {
             extern UART_HandleTypeDef huart2;
-            char last_seen[64] = {0};
+            uint32_t last_seen_rx_count = Dispersion_GetRxCount();
+            uint32_t last_wait_print_ms = HAL_GetTick();
             Dispersion_SetTestResponseMode(1);
             printf(ANSI_CYAN "[DIAG] SB-ESP RX monitor active (press ESC to exit)\r\n" ANSI_RESET);
             while (1)
@@ -1023,11 +1095,29 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 }
                 if (Console_CheckEscPressed()) break;
 
-                const char *msg = Dispersion_GetLastStatus();
-                if (msg && msg[0] != '\0' && strcmp(msg, last_seen) != 0) {
-                    strncpy(last_seen, msg, sizeof(last_seen) - 1);
-                    last_seen[sizeof(last_seen) - 1] = '\0';
-                    printf("[DIAG] SB-ESP RX: %s\r\n", last_seen);
+                uint32_t now_ms = HAL_GetTick();
+
+                uint32_t rx_count = Dispersion_GetRxCount();
+                if (rx_count != last_seen_rx_count) {
+                    last_seen_rx_count = rx_count;
+                    const char *msg = Dispersion_GetLastStatus();
+                    if (msg && msg[0] != '\0') {
+                        printf("[DIAG] SB-ESP RX[%lu]: %s\r\n", rx_count, msg);
+                    } else {
+                        printf("[DIAG] SB-ESP RX[%lu]: <empty>\r\n", rx_count);
+                    }
+                    last_wait_print_ms = HAL_GetTick();
+                } else {
+                    if ((now_ms - last_wait_print_ms) >= 3000u) {
+                        uint32_t age = Dispersion_GetLastRxMs() ? (now_ms - Dispersion_GetLastRxMs()) : 0xFFFFFFFFu;
+                        uint32_t tx_count = Dispersion_GetTxCount();
+                        if (age == 0xFFFFFFFFu) {
+                            printf("[DIAG] SB-ESP RX waiting... tx=%lu rx=%lu age=--\r\n", tx_count, rx_count);
+                        } else {
+                            printf("[DIAG] SB-ESP RX waiting... tx=%lu rx=%lu age=%lums\r\n", tx_count, rx_count, age);
+                        }
+                        last_wait_print_ms = now_ms;
+                    }
                 }
 
                 HAL_Delay(50);
