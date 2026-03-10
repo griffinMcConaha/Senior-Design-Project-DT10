@@ -6,7 +6,6 @@
 
 // ============================================================================
 // SALT AND BRINE DISPERSION CONTROL (PHASE 4)
-// Maintains 1:9 salt:brine ratio with flow sensor feedback
 // UART 4 communication with dispersion ESP32 (9600 baud)
 // ============================================================================
 
@@ -60,9 +59,9 @@ void Dispersion_Init(UART_HandleTypeDef *huart4)
     printf("[DISP] Dispersion system initialized (UART 4 at 9600 baud)\r\n");
 }
 
-// Set dispersion rates with automatic 1:9 ratio enforcement
+// Set dispersion rates as direct pass-through percentages
 // salt_rate: 0-100 (0-100% output)
-// brine_rate: 0-100 (0-100% output, will be auto-adjusted to maintain 1:9 ratio)
+// brine_rate: 0-100 (0-100% output)
 void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate)
 {
     if (!disp_state.initialized)
@@ -71,29 +70,6 @@ void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate)
     // Clamp input ranges
     if (salt_rate > 100) salt_rate = 100;
     if (brine_rate > 100) brine_rate = 100;
-
-    // Enforce 1:9 salt:brine ratio
-    // If salt is the limiting factor, calculate brine as 9x salt
-    if (salt_rate > 0)
-    {
-        uint16_t calculated_brine = (uint16_t)salt_rate * 9;
-        if (calculated_brine > 100)
-        {
-            // Brine would exceed max, back off salt proportionally
-            salt_rate = 100 / 9; // ~11%
-            brine_rate = 100;
-        }
-        else
-        {
-            // Set brine to maintain 1:9 ratio
-            brine_rate = calculated_brine;
-        }
-    }
-    else
-    {
-        // No salt means no brine
-        brine_rate = 0;
-    }
 
     // Store rates
     disp_state.salt_rate_percent = salt_rate;
@@ -306,7 +282,7 @@ void Dispersion_RxByte(uint8_t byte)
     }
 }
 
-// Dispersion control task - called periodically to monitor and enforce ratios
+// Dispersion task - called periodically to monitor/telemetry only
 void Dispersion_Task(void)
 {
     if (!disp_state.initialized)
@@ -316,52 +292,17 @@ void Dispersion_Task(void)
     uint16_t salt_flow = Dispersion_ReadSaltFlow();
     uint16_t brine_flow = Dispersion_ReadBrineFlow();
 
-    // Check for clogged dispensers
-    // If rate > 0 but no flow detected, assume clogged
+    // Check for clogged dispensers (monitor only; no automatic rate overrides)
     if (disp_state.salt_rate_percent > 10 && salt_flow < 5)
     {
-        // Salt auger clogged or sensor error
         printf("[DISP] WARNING: Salt auger may be clogged (rate=%d%%, flow=%d mL/min)\r\n",
                disp_state.salt_rate_percent, salt_flow);
-        // TODO: Set fault code FAULT_DISPERSION_CLOG
-        Dispersion_SetRate(0, 0); // Stop dispensing
-        return;
     }
 
     if (disp_state.brine_rate_percent > 10 && brine_flow < 5)
     {
-        // Brine pump clogged or sensor error
         printf("[DISP] WARNING: Brine pump may be clogged (rate=%d%%, flow=%d mL/min)\r\n",
                disp_state.brine_rate_percent, brine_flow);
-        // TODO: Set fault code FAULT_DISPERSION_CLOG
-        Dispersion_SetRate(0, 0); // Stop dispensing
-        return;
-    }
-
-    // Enforce ratio even with real flow
-    // Target ratio: 1:9 (salt:brine)
-    if (salt_flow > 0 && brine_flow > 0)
-    {
-        float measured_ratio = (float)brine_flow / (float)salt_flow;
-        float target_ratio = 9.0f;
-
-        // If ratio off by >20%, adjust
-        if (measured_ratio > (target_ratio * 1.2f) || measured_ratio < (target_ratio * 0.8f))
-        {
-            // Recalculate to enforce exact ratio
-            uint8_t corrected_salt = disp_state.salt_rate_percent;
-            uint16_t corrected_brine = corrected_salt * 9;
-
-            if (corrected_brine > 100)
-            {
-                corrected_salt = 100 / 9;
-                corrected_brine = 100;
-            }
-
-            // Only log if significantly different
-            printf("[DISP] Ratio correction: measured=%.1f, target=%.1f\r\n",
-                   measured_ratio, target_ratio);
-        }
     }
 
     // Periodic monitoring (every 5 seconds)
