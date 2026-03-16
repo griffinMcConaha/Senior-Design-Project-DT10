@@ -1,6 +1,8 @@
 #include "uart_lora.h"
 #include "robot_sm.h"
 #include "system_health.h"
+#include "lora_contracts.h"
+#include "mission.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -45,6 +47,10 @@ typedef struct {
 static LoRA_State_t lora_state = {0};
 static uint8_t s_lora_verbose = 0;
 
+static Waypoint_t s_lora_wp_buf[MAX_WAYPOINTS];
+static uint8_t s_lora_wp_count = 0;
+extern RobotSM_t g_sm;
+
 static uint8_t lora_parse_state_request(const char *cmd, uint8_t *out_state)
 {
     if (!cmd || !out_state) return 0;
@@ -87,20 +93,24 @@ static uint8_t lora_parse_state_request(const char *cmd, uint8_t *out_state)
         *comma = '\0';
     }
 
-    if (strcmp(payload, "AUTO") == 0) {
-        *out_state = 1; // STATE_AUTO
+    if (strcmp(payload, LORA_CMD_AUTO) == 0) {
+        *out_state = STATE_AUTO;
         return 1;
     }
-    if (strcmp(payload, "MANUAL") == 0) {
-        *out_state = 0; // STATE_MANUAL
+    if (strcmp(payload, LORA_CMD_MANUAL) == 0) {
+        *out_state = STATE_MANUAL;
         return 1;
     }
-    if (strcmp(payload, "PAUSE") == 0) {
-        *out_state = 2; // STATE_PAUSE
+    if (strcmp(payload, LORA_CMD_PAUSE) == 0) {
+        *out_state = STATE_PAUSE;
         return 1;
     }
-    if (strcmp(payload, "ESTOP") == 0 || strcmp(payload, "STOP") == 0) {
-        *out_state = 4; // STATE_ESTOP
+    if (strcmp(payload, LORA_CMD_ESTOP) == 0) {
+        *out_state = STATE_ESTOP;
+        return 1;
+    }
+    if (strcmp(payload, LORA_CMD_RESET) == 0) {
+        *out_state = STATE_PAUSE;
         return 1;
     }
 
@@ -373,6 +383,66 @@ void LoRA_RxByte(uint8_t byte)
                     printf("[LORA] Valid manual command: %s -> cmd=%u\r\n", cmd, (unsigned)lora_state.pending_manual_cmd);
                 }
             }
+            else if (strcmp(cmd, LORA_WP_CLEAR) == 0)
+            {
+                memset(s_lora_wp_buf, 0, sizeof(s_lora_wp_buf));
+                s_lora_wp_count = 0;
+                Mission_Init();
+                LoRA_SendRaw(LORA_WP_ACK_CLEAR);
+                if (s_lora_verbose) {
+                    printf("[LORA] Cleared staged waypoint set\r\n");
+                }
+            }
+            else if (strncmp(cmd, LORA_WP_ADD_PREFIX ":", 3) == 0)
+            {
+                uint8_t idx = 0;
+                float lat = 0.0f;
+                float lon = 0.0f;
+                int salt_pct = 0;
+                int brine_pct = 0;
+
+                if (sscanf(cmd + 3, "%hhu:%f,%f,%d,%d", &idx, &lat, &lon, &salt_pct, &brine_pct) == 5 && idx < MAX_WAYPOINTS)
+                {
+                    char ack[24];
+
+                    if (salt_pct < 0) salt_pct = 0;
+                    if (salt_pct > 100) salt_pct = 100;
+                    if (brine_pct < 0) brine_pct = 0;
+                    if (brine_pct > 100) brine_pct = 100;
+
+                    s_lora_wp_buf[idx].latitude = lat;
+                    s_lora_wp_buf[idx].longitude = lon;
+                    s_lora_wp_buf[idx].salt_rate = (float)salt_pct / 100.0f;
+                    s_lora_wp_buf[idx].brine_rate = (float)brine_pct / 100.0f;
+                    if ((uint8_t)(idx + 1) > s_lora_wp_count) {
+                        s_lora_wp_count = (uint8_t)(idx + 1);
+                    }
+
+                    Mission_AddWaypoint(lat, lon, (uint8_t)salt_pct, (uint8_t)brine_pct);
+
+                    snprintf(ack, sizeof(ack), "%s:%hhu", LORA_WP_ACK_ADD_PREFIX, idx);
+                    LoRA_SendRaw(ack);
+                    if (s_lora_verbose) {
+                        printf("[LORA] Staged waypoint %u lat=%.6f lon=%.6f salt=%d brine=%d\r\n",
+                               idx, lat, lon, salt_pct, brine_pct);
+                    }
+                }
+            }
+            else if (strncmp(cmd, LORA_WP_LOAD_PREFIX ":", 7) == 0)
+            {
+                uint8_t count = 0;
+                if (sscanf(cmd + 7, "%hhu", &count) == 1 && count > 0 && count == s_lora_wp_count)
+                {
+                    char ack[28];
+
+                    RobotSM_LoadMission(&g_sm, s_lora_wp_buf, s_lora_wp_count);
+                    snprintf(ack, sizeof(ack), "%s:%hhu", LORA_WP_ACK_LOAD_PREFIX, count);
+                    LoRA_SendRaw(ack);
+                    if (s_lora_verbose) {
+                        printf("[LORA] Loaded %u staged waypoints into mission state\r\n", count);
+                    }
+                }
+            }
             else
             {
                 if (s_lora_verbose) {
@@ -398,7 +468,8 @@ void LoRA_RxByte(uint8_t byte)
 
     // Accept control frames that start with CMD:/stream wrappers or bare state words
     if (lora_state.rx_index == 0) {
-        if (byte != 'C' && byte != 'S' && byte != 'A' && byte != 'M' && byte != 'P' && byte != 'E' && byte != 'a' && byte != 'm' && byte != 'p' && byte != 'e') {
+        if (byte != 'C' && byte != 'S' && byte != 'A' && byte != 'M' && byte != 'P' && byte != 'E' && byte != 'W' &&
+            byte != 'a' && byte != 'm' && byte != 'p' && byte != 'e' && byte != 'w') {
             return;
         }
     } else if (lora_state.rx_buffer[0] == 'C') {
@@ -545,12 +616,12 @@ void LoRA_SendFault(uint8_t fault_code, uint8_t action)
         case 0: fault_name = "NONE"; break;
         case 1: fault_name = "IMU_TIMEOUT"; break;
         case 2: fault_name = "GPS_LOSS"; break;
-        case 3: fault_name = "PROXIMITY_WARN"; break;
-        case 4: fault_name = "PROXIMITY_CRIT"; break;
-        case 5: fault_name = "BATTERY_COLD"; break;
-        case 6: fault_name = "DISPERSION_CLOG"; break;
-        case 7: fault_name = "GENERIC"; break;
-        case 8: fault_name = "RESERVED"; break;
+        case 3: fault_name = "MOTOR_FEEDBACK"; break;
+        case 4: fault_name = "BATTERY_COLD"; break;
+        case 5: fault_name = "PROXIMITY_WARN"; break;
+        case 6: fault_name = "PROXIMITY_CRIT"; break;
+        case 7: fault_name = "DISPERSION_CLOG"; break;
+        default: fault_name = "GENERIC"; break;
     }
 
     const char *action_name = "UNKNOWN";

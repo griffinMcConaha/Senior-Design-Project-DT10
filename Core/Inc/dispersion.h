@@ -27,6 +27,12 @@ void Dispersion_SendPercentOnly(uint8_t percent);
 // Send raw command string to dispersion ESP32 (appends CRLF if missing)
 void Dispersion_SendRaw(const char *text);
 
+// Request ESP32 startup agitation check (3-minute brine agitation window)
+void Dispersion_RequestStartupCheck(void);
+
+// Bypass ESP32 startup agitation check (immediate command enable)
+void Dispersion_BypassStartupCheck(void);
+
 // Read salt flow sensor (mL/min)
 uint16_t Dispersion_ReadSaltFlow(void);
 

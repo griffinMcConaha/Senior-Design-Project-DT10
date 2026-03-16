@@ -10,6 +10,7 @@
 #include "console_io.h"  // For ANSI color codes
 #include "stm32f4xx_hal.h"
 #include <stdio.h>
+#include <string.h>
 
 // ============================================================================
 // HARDWARE DIAGNOSTICS AND COMPONENT TESTING
@@ -202,6 +203,13 @@ void Diag_TestSaltRate(uint8_t rate_percent)
     // Enable detailed ESP responses only during active salt test
     Dispersion_SetTestResponseMode(1);
 
+    char last_seen[64] = {0};
+    const char *before = Dispersion_GetLastStatus();
+    if (before && before[0] != '\0') {
+        strncpy(last_seen, before, sizeof(last_seen) - 1);
+        last_seen[sizeof(last_seen) - 1] = '\0';
+    }
+
     // Send explicit framed command for deterministic ESP parser handling
     Dispersion_SetRateDirect(rate_percent, 0);
 
@@ -212,6 +220,16 @@ void Diag_TestSaltRate(uint8_t rate_percent)
     while (1)
     {
         Diag_WatchdogKick();
+
+        const char *msg = Dispersion_GetLastStatus();
+        if (msg && msg[0] != '\0' && strcmp(msg, last_seen) != 0) {
+            strncpy(last_seen, msg, sizeof(last_seen) - 1);
+            last_seen[sizeof(last_seen) - 1] = '\0';
+            if ((strncmp(last_seen, "STATUS:", 7) == 0) || (strncmp(last_seen, "FLOW:", 5) == 0)) {
+                printf("[DIAG] SB-ESP RX: %s\r\n", last_seen);
+            }
+        }
+
         if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
             uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
             if (ch == 0x1B) {
@@ -285,6 +303,13 @@ void Diag_TestBrineRate(uint8_t rate_percent)
     // Enable detailed ESP responses only during active brine test
     Dispersion_SetTestResponseMode(1);
 
+    char last_seen[128] = {0};
+    const char *before = Dispersion_GetLastStatus();
+    if (before && before[0] != '\0') {
+        strncpy(last_seen, before, sizeof(last_seen) - 1);
+        last_seen[sizeof(last_seen) - 1] = '\0';
+    }
+
         // Send explicit framed command for deterministic ESP parser handling
         Dispersion_SetRateDirect(0, rate_percent);
 
@@ -296,6 +321,16 @@ void Diag_TestBrineRate(uint8_t rate_percent)
     while (1)
     {
         Diag_WatchdogKick();
+
+        const char *msg = Dispersion_GetLastStatus();
+        if (msg && msg[0] != '\0' && strcmp(msg, last_seen) != 0) {
+            strncpy(last_seen, msg, sizeof(last_seen) - 1);
+            last_seen[sizeof(last_seen) - 1] = '\0';
+            if ((strncmp(last_seen, "STATUS:", 7) == 0) || (strncmp(last_seen, "FLOW:", 5) == 0)) {
+                printf("[DIAG] SB-ESP RX: %s\r\n", last_seen);
+            }
+        }
+
         if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
             uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
             if (ch == 0x1B) {

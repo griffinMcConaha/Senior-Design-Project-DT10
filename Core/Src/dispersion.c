@@ -23,7 +23,7 @@ typedef struct {
     uint8_t rx_buffer[DISP_RX_BUFFER_SIZE];
     uint16_t rx_index;
     uint8_t rx_discard_until_eol;
-    char last_status[64];
+    char last_status[128];
     uint32_t clog_timeout_ticks;// Ticks until clog detection timeout
     uint8_t verbose_test_responses; // 1=print ESP responses for test salt/brine modes
     uint32_t last_tx_ms;
@@ -34,6 +34,38 @@ typedef struct {
 } Dispersion_State_t;
 
 static Dispersion_State_t disp_state = {0};
+
+void Dispersion_RequestStartupCheck(void)
+{
+    if (!disp_state.initialized || !disp_state.huart)
+        return;
+
+    const char *cmd = "STARTUP_CHECK\r\n";
+    HAL_StatusTypeDef tx_status = HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+    if (tx_status == HAL_OK) {
+        disp_state.last_tx_ms = HAL_GetTick();
+        disp_state.tx_count++;
+        printf("[DISP] TX CMD: %s", cmd);
+    } else {
+        printf("[DISP] UART4 TX failed (StartupCheck), status=%d\r\n", (int)tx_status);
+    }
+}
+
+void Dispersion_BypassStartupCheck(void)
+{
+    if (!disp_state.initialized || !disp_state.huart)
+        return;
+
+    const char *cmd = "STARTUP_BYPASS\r\n";
+    HAL_StatusTypeDef tx_status = HAL_UART_Transmit(disp_state.huart, (uint8_t *)cmd, strlen(cmd), HAL_MAX_DELAY);
+    if (tx_status == HAL_OK) {
+        disp_state.last_tx_ms = HAL_GetTick();
+        disp_state.tx_count++;
+        printf("[DISP] TX CMD: %s", cmd);
+    } else {
+        printf("[DISP] UART4 TX failed (StartupBypass), status=%d\r\n", (int)tx_status);
+    }
+}
 
 // Initialize dispersion system
 // - PWM outputs: salt auger (motor 3) and brine pump (motor 4)
@@ -60,7 +92,7 @@ void Dispersion_Init(UART_HandleTypeDef *huart4)
     disp_state.tx_count = 0;
     disp_state.rx_count = 0;
     disp_state.raw_rx_byte_count = 0;
-    
+
     printf("[DISP] Dispersion system initialized (UART 4 at 9600 baud)\r\n");
 }
 

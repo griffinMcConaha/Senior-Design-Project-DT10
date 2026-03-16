@@ -451,6 +451,11 @@ int main(void)
 
       if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
         uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+        if (ch == 'S' || ch == 's') {
+          Dispersion_BypassStartupCheck();
+          printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
+          continue;
+        }
         if (ch == 'T' || ch == 't') {
           Console_RxByte(ch, &g_sm);
           Console_RxByte('\r', &g_sm);
@@ -471,6 +476,18 @@ int main(void)
   uint32_t last_lora_tx_ms = HAL_GetTick();
   const uint32_t lora_tx_interval_ms = 10000;
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
+    uint8_t startup_mode_sent = 0;
+    uint8_t last_test_mode_seen = g_test_mode;
+
+    if (g_test_mode) {
+      Dispersion_BypassStartupCheck();
+      startup_mode_sent = 1;
+      printf("[DISP] Startup check bypassed (test mode active)\r\n");
+    } else {
+      Dispersion_RequestStartupCheck();
+      startup_mode_sent = 1;
+      printf("[DISP] Startup check requested (normal mode)\r\n");
+    }
 
   while (1)
   {
@@ -480,12 +497,23 @@ int main(void)
         // Poll USART2 for console input (non-interrupt, low-latency control)
       if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
           uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+          if (ch == 'S' || ch == 's') {
+            Dispersion_BypassStartupCheck();
+            printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
+            continue;
+          }
           Console_RxByte(ch, &g_sm);
       }
       
 	  uint32_t now_ms = HAL_GetTick();
 	  GPS_Tick(now_ms);
 	  const GPS_Data_t *gps = GPS_Get();
+
+      if (startup_mode_sent && g_test_mode && !last_test_mode_seen) {
+          Dispersion_BypassStartupCheck();
+          printf("[DISP] Startup check bypassed (entered test mode)\r\n");
+      }
+      last_test_mode_seen = g_test_mode;
 
       // Test mode bypasses autonomous/manual control loop (diagnostics only)
       if (g_test_mode) {

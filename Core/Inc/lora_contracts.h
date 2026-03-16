@@ -1,0 +1,27 @@
+#ifndef LORA_CONTRACTS_H
+#define LORA_CONTRACTS_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define LORA_CMD_AUTO "AUTO"
+#define LORA_CMD_MANUAL "MANUAL"
+#define LORA_CMD_PAUSE "PAUSE"
+#define LORA_CMD_ESTOP "ESTOP"
+#define LORA_CMD_STOP "STOP"
+#define LORA_CMD_RESET "RESET"
+
+#define LORA_WP_CLEAR "WPCLEAR"
+#define LORA_WP_ADD_PREFIX "WP"
+#define LORA_WP_LOAD_PREFIX "WPLOAD"
+
+#define LORA_WP_ACK_CLEAR "ACK:WPCLEAR"
+#define LORA_WP_ACK_ADD_PREFIX "ACK:WP"
+#define LORA_WP_ACK_LOAD_PREFIX "ACK:WPLOAD"
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

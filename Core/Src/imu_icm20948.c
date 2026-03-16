@@ -540,7 +540,6 @@ void IMU_Calibrate(uint16_t samples, uint16_t delay_ms)
         if (!st.ok)
         {
             // If reads fail, still continue but you’ll get bad biases
-            // You can break here if you want stricter behavior.
         }
 
         sax += (int32_t)s_ax;

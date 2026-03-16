@@ -384,6 +384,8 @@ void Console_ShowTestMenu(void)
     printf("X. TEST LORACMDS  - Send example LoRa control command set\r\n");
     printf("E. TEST SBESP SEND - Type and send Salt-Brine ESP32 string\r\n");
     printf("Q. TEST SBESP RX   - Monitor Salt-Brine ESP32 RX (press ESC)\r\n");
+    printf("A. TEST AGITATOR   - Brine agitator ON/OFF control\r\n");
+    printf("W. TEST THROWER    - Salt thrower ON/OFF control\r\n");
     printf("P. TEST PROXIMITY - Ultrasonic sensors left/right (press ESC)\r\n");
     printf("M. TEST SABERTOOTH MONITOR - Live feedback polling (press ESC)\r\n" ANSI_RESET);
     printf("Or type the full command (e.g. TEST MOTOR 1 25)\r\n");
@@ -728,6 +730,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     if (strcmp(cmd_upper, "E") == 0)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
+        extern UART_HandleTypeDef huart2;
+        uint8_t should_send_zero_on_exit = 1;
         printf(ANSI_CYAN "\r\n[DIAG] ===== SB-ESP SEND MENU =====\r\n" ANSI_RESET);
         printf("[DIAG] Type text and press ENTER to send over UART4\r\n");
         printf("[DIAG] Press ESC to exit this send menu\r\n");
@@ -743,7 +747,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             }
 
             const char *before = Dispersion_GetLastStatus();
-            char before_buf[64] = {0};
+            char before_buf[128] = {0};
             if (before) {
                 strncpy(before_buf, before, sizeof(before_buf) - 1);
                 before_buf[sizeof(before_buf) - 1] = '\0';
@@ -757,18 +761,64 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 
             Dispersion_SetTestResponseMode(1);
             Dispersion_SendRaw(normalized_sb_text);
-            HAL_Delay(250);
-            const char *after = Dispersion_GetLastStatus();
-            if (after && strcmp(after, before_buf) != 0) {
-                if ((strncmp(after, "STATUS:", 7) == 0) || (strncmp(after, "FLOW:", 5) == 0)) {
-                    printf("[DIAG] SB-ESP RX: %s\r\n", after);
-                } else {
-                    printf("[DIAG] SB-ESP RX ignored (non-protocol noise/echo): %s\r\n", after);
+            printf("[DIAG] Polling SB-ESP responses (press ESC to stop polling)\r\n");
+
+            uint32_t last_seen_rx_count = Dispersion_GetRxCount();
+            uint32_t last_wait_print_ms = HAL_GetTick();
+
+            while (1) {
+                Console_WatchdogKick();
+
+                if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+                    uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+                    if (ch == 0x1B) {
+                        printf("\r\n[DIAG] Polling stopped\r\n");
+                        break;
+                    }
                 }
-            } else {
-                printf("[DIAG] SB-ESP: no new RX yet (use Q / TEST SBESPRX to monitor)\r\n");
+                if (Console_CheckEscPressed()) {
+                    printf("\r\n[DIAG] Polling stopped\r\n");
+                    break;
+                }
+
+                uint32_t now_ms = HAL_GetTick();
+                uint32_t rx_count = Dispersion_GetRxCount();
+
+                if (rx_count != last_seen_rx_count) {
+                    last_seen_rx_count = rx_count;
+                    const char *msg = Dispersion_GetLastStatus();
+                    if (msg && msg[0] != '\0') {
+                        if ((strncmp(msg, "STATUS:", 7) == 0) || (strncmp(msg, "FLOW:", 5) == 0)) {
+                            printf("[DIAG] SB-ESP RX[%lu]: %s\r\n", rx_count, msg);
+                        } else {
+                            printf("[DIAG] SB-ESP RX[%lu] ignored (non-protocol noise/echo): %s\r\n", rx_count, msg);
+                        }
+                    } else {
+                        printf("[DIAG] SB-ESP RX[%lu]: <empty>\r\n", rx_count);
+                    }
+                    last_wait_print_ms = now_ms;
+                } else if ((now_ms - last_wait_print_ms) >= 3000u) {
+                    uint32_t age = Dispersion_GetLastRxMs() ? (now_ms - Dispersion_GetLastRxMs()) : 0xFFFFFFFFu;
+                    uint32_t tx_count = Dispersion_GetTxCount();
+                    if (age == 0xFFFFFFFFu) {
+                        printf("[DIAG] SB-ESP RX waiting... tx=%lu rx=%lu age=--\r\n", tx_count, rx_count);
+                    } else {
+                        printf("[DIAG] SB-ESP RX waiting... tx=%lu rx=%lu age=%lums\r\n", tx_count, rx_count, age);
+                    }
+                    last_wait_print_ms = now_ms;
+                }
+
+                HAL_Delay(50);
             }
+
+            break;
         }
+
+        if (should_send_zero_on_exit) {
+            Dispersion_SetRateDirect(0, 0);
+            printf("[DIAG] SB-ESP OFF command sent on menu exit: SALT=0%% BRINE=0%%\r\n");
+        }
+
         Dispersion_SetTestResponseMode(0);
         Console_ShowTestMenu();
         return;
@@ -824,6 +874,70 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
+    if (strcmp(cmd_upper, "A") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        printf(ANSI_CYAN "\r\n[DIAG] ===== BRINE AGITATOR TEST =====\r\n" ANSI_RESET);
+        printf("[DIAG] Type ON or OFF and press ENTER (ESC to exit)\r\n\r\n");
+        while (1) {
+            char ag_input[16] = {0};
+            if (!Console_ReadLineBlocking("[DIAG] Agitator ON or OFF: ", ag_input, sizeof(ag_input))) {
+                break;
+            }
+            for (int i = 0; ag_input[i]; i++) ag_input[i] = (char)toupper((unsigned char)ag_input[i]);
+            if (strcmp(ag_input, "ON") == 0 || strcmp(ag_input, "OFF") == 0) {
+                char ag_cmd[24];
+                snprintf(ag_cmd, sizeof(ag_cmd), "AGITATOR %s", ag_input);
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(ag_cmd);
+                HAL_Delay(400);
+                const char *resp = Dispersion_GetLastStatus();
+                if (resp && resp[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", resp);
+                } else {
+                    printf("[DIAG] No response from SB-ESP\r\n");
+                }
+            } else if (ag_input[0] != '\0') {
+                printf("[DIAG] Invalid input - type ON or OFF\r\n");
+            }
+        }
+        Dispersion_SetTestResponseMode(0);
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "W") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        printf(ANSI_CYAN "\r\n[DIAG] ===== SALT THROWER TEST =====\r\n" ANSI_RESET);
+        printf("[DIAG] Type ON or OFF and press ENTER (ESC to exit)\r\n\r\n");
+        while (1) {
+            char th_input[16] = {0};
+            if (!Console_ReadLineBlocking("[DIAG] Thrower ON or OFF: ", th_input, sizeof(th_input))) {
+                break;
+            }
+            for (int i = 0; th_input[i]; i++) th_input[i] = (char)toupper((unsigned char)th_input[i]);
+            if (strcmp(th_input, "ON") == 0 || strcmp(th_input, "OFF") == 0) {
+                char th_cmd[24];
+                snprintf(th_cmd, sizeof(th_cmd), "THROWER %s", th_input);
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(th_cmd);
+                HAL_Delay(400);
+                const char *resp = Dispersion_GetLastStatus();
+                if (resp && resp[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", resp);
+                } else {
+                    printf("[DIAG] No response from SB-ESP\r\n");
+                }
+            } else if (th_input[0] != '\0') {
+                printf("[DIAG] Invalid input - type ON or OFF\r\n");
+            }
+        }
+        Dispersion_SetTestResponseMode(0);
+        Console_ShowTestMenu();
+        return;
+    }
+
     // ========== HELP COMMAND ==========
     if (strcmp(cmd_upper, "HELP") == 0 || strcmp(cmd_upper, "?") == 0)
     {
@@ -841,6 +955,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         printf("  TEST SALTSWEEP [delay]          - Sweep salt pump, delay in ms (default 100)\r\n");
         printf("  TEST BRINE <percent>            - Brine pump, 0-100%% (default 50)\r\n");
         printf("  TEST BRINESWEEP [delay]         - Sweep brine pump, delay in ms (default 100)\r\n");
+        printf("  TEST AGITATOR <ON/OFF>          - Brine agitator direct control\r\n");
+        printf("  TEST THROWER  <ON/OFF>          - Salt thrower direct control\r\n");
         printf("  TEST SBESP <text>               - Send raw Salt-Brine ESP32 string\r\n");
         printf("  TEST SBESPRX                    - Monitor Salt-Brine ESP32 messages\r\n");
         printf("  TEST LORA <text>                - Send raw LoRa string to ESP32\r\n");
@@ -1022,6 +1138,50 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             return;
         }
 
+        // TEST AGITATOR ON/OFF
+        if (strncmp(subcmd_up, "AGITATOR", 8) == 0)
+        {
+            const char *ag_arg = subcmd_up + 8;
+            while (*ag_arg == ' ') ag_arg++;
+            if (strcmp(ag_arg, "ON") == 0 || strcmp(ag_arg, "OFF") == 0) {
+                char ag_cmd[24];
+                snprintf(ag_cmd, sizeof(ag_cmd), "AGITATOR %s", ag_arg);
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(ag_cmd);
+                HAL_Delay(400);
+                const char *resp = Dispersion_GetLastStatus();
+                if (resp && resp[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", resp);
+                }
+                Dispersion_SetTestResponseMode(0);
+            } else {
+                printf("[DIAG] Usage: TEST AGITATOR ON  or  TEST AGITATOR OFF\r\n");
+            }
+            return;
+        }
+
+        // TEST THROWER ON/OFF
+        if (strncmp(subcmd_up, "THROWER", 7) == 0)
+        {
+            const char *th_arg = subcmd_up + 7;
+            while (*th_arg == ' ') th_arg++;
+            if (strcmp(th_arg, "ON") == 0 || strcmp(th_arg, "OFF") == 0) {
+                char th_cmd[24];
+                snprintf(th_cmd, sizeof(th_cmd), "THROWER %s", th_arg);
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(th_cmd);
+                HAL_Delay(400);
+                const char *resp = Dispersion_GetLastStatus();
+                if (resp && resp[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", resp);
+                }
+                Dispersion_SetTestResponseMode(0);
+            } else {
+                printf("[DIAG] Usage: TEST THROWER ON  or  TEST THROWER OFF\r\n");
+            }
+            return;
+        }
+
         // TEST GPS
         if (strcmp(subcmd_up, "GPS") == 0)
         {
@@ -1048,7 +1208,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 printf("[DIAG] Usage: TEST SBESP <text>\r\n");
             } else {
                 const char *before = Dispersion_GetLastStatus();
-                char before_buf[64] = {0};
+                char before_buf[128] = {0};
                 if (before) {
                     strncpy(before_buf, before, sizeof(before_buf) - 1);
                     before_buf[sizeof(before_buf) - 1] = '\0';
