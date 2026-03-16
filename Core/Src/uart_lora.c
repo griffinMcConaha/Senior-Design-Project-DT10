@@ -42,6 +42,7 @@ typedef struct {
     uint32_t stream_gap_count;
     char stream_buffer[LORA_STREAM_BUFFER_SIZE];
     uint16_t stream_len;
+    uint8_t drop_until_eol;
 } LoRA_State_t;
 
 static LoRA_State_t lora_state = {0};
@@ -266,6 +267,7 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.stream_expected_seq = 0;
     lora_state.stream_gap_count = 0;
     lora_state.stream_len = 0;
+    lora_state.drop_until_eol = 0;
     memset(lora_state.rx_buffer, 0, LORA_RX_BUFFER_SIZE);
     memset(lora_state.raw_buffer, 0, LORA_RX_BUFFER_SIZE);
     memset(lora_state.last_raw_frame, 0, sizeof(lora_state.last_raw_frame));
@@ -453,6 +455,8 @@ void LoRA_RxByte(uint8_t byte)
             // Reset buffer
             lora_state.rx_index = 0;
         }
+
+        lora_state.drop_until_eol = 0;
         return;
     }
 
@@ -466,10 +470,15 @@ void LoRA_RxByte(uint8_t byte)
         lora_state.raw_index = 0;
     }
 
+    if (lora_state.drop_until_eol) {
+        return;
+    }
+
     // Accept control frames that start with CMD:/stream wrappers or bare state words
     if (lora_state.rx_index == 0) {
         if (byte != 'C' && byte != 'S' && byte != 'A' && byte != 'M' && byte != 'P' && byte != 'E' && byte != 'W' &&
             byte != 'a' && byte != 'm' && byte != 'p' && byte != 'e' && byte != 'w') {
+            lora_state.drop_until_eol = 1;
             return;
         }
     } else if (lora_state.rx_buffer[0] == 'C') {
