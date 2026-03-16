@@ -117,6 +117,35 @@ volatile uint32_t imu_last_update_ms = 0; // Last IMU read timestamp
 volatile uint8_t g_test_mode = 0;         // 1 = stay in test mode until reset
 static uint8_t s_disp_uart4_rx_byte = 0;
 static uint8_t s_lora_uart5_rx_byte = 0;
+static uint16_t s_console_line_len = 0;
+static uint8_t s_startup_bypass_candidate = 0;
+
+static uint8_t Console_HandleStartupBypassKey(uint8_t ch)
+{
+  if (ch == '\r' || ch == '\n') {
+    uint8_t should_bypass = (s_startup_bypass_candidate && s_console_line_len == 1u);
+    s_console_line_len = 0;
+    s_startup_bypass_candidate = 0;
+    if (should_bypass) {
+      Dispersion_BypassStartupCheck();
+      printf("[DISP] Startup check bypass requested by explicit console command 'S'\\r\\n");
+      return 1;
+    }
+    return 0;
+  }
+
+  if (s_console_line_len == 0u && (ch == 'S' || ch == 's')) {
+    s_startup_bypass_candidate = 1u;
+  } else {
+    s_startup_bypass_candidate = 0u;
+  }
+
+  if (s_console_line_len < 0xFFFFu) {
+    s_console_line_len++;
+  }
+
+  return 0;
+}
 
 static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
 {
@@ -451,9 +480,7 @@ int main(void)
 
       if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
         uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-        if (ch == 'S' || ch == 's') {
-          Dispersion_BypassStartupCheck();
-          printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
+        if (Console_HandleStartupBypassKey(ch)) {
           continue;
         }
         if (ch == 'T' || ch == 't') {
@@ -497,9 +524,7 @@ int main(void)
         // Poll USART2 for console input (non-interrupt, low-latency control)
       if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
           uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-          if (ch == 'S' || ch == 's') {
-            Dispersion_BypassStartupCheck();
-            printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
+          if (Console_HandleStartupBypassKey(ch)) {
             continue;
           }
           Console_RxByte(ch, &g_sm);
