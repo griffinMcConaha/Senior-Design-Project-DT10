@@ -72,6 +72,37 @@ void Sabertooth_RxCallback(void);
 /** @brief Process a single received UART byte (call from HAL_UART_RxCpltCallback) */
 void Sabertooth_ProcessRxByte(uint8_t byte);
 
+// ============================================================================
+// MIXED MODE (Tank Drive) Control - MD and MT commands
+// ============================================================================
+
+/** @brief Set mixed drive (forward/backward) for both motors in tank mode
+ *  @param drive Speed in percent [-100..+100] where 0=stop, +100=full forward, -100=full reverse
+ *  Must also set turn command for mixed mode to work
+ */
+void Sabertooth_SetMixedDrive(int drive);
+
+/** @brief Set mixed turn (left/right) for tank drive
+ *  @param turn Speed in percent [-100..+100] where 0=straight, +100=full right, -100=full left
+ *  Must also set drive command for mixed mode to work
+ */
+void Sabertooth_SetMixedTurn(int turn);
+
+// ============================================================================
+// RAMP RATE Control - R1 and R2 commands
+// ============================================================================
+
+/** @brief Set ramp rate for motor 1 (acceleration smoothing)
+ *  @param rate Ramp value [-2047..+2047] where 2047 = ~8 seconds from stop to full speed
+ *  Smaller values = faster acceleration, larger values = slower/smoother acceleration
+ */
+void Sabertooth_SetRampM1(int rate);
+
+/** @brief Set ramp rate for motor 2 (acceleration smoothing)
+ *  @param rate Ramp value [-2047..+2047] where 2047 = ~8 seconds from stop to full speed
+ */
+void Sabertooth_SetRampM2(int rate);
+
 #ifdef __cplusplus
 }
 #endif

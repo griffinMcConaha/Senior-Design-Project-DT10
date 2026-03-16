@@ -18,6 +18,19 @@ void Diag_TestMotorRaw(uint8_t motor, int value);
 // delay_ms: milliseconds to hold each speed
 void Diag_TestMotorSweep(uint16_t delay_ms);
 
+// Explicit motor tests: full forward/reverse and turns
+void Diag_TestMotorFullForward(void);      // Both motors at 100% forward
+void Diag_TestMotorFullReverse(void);      // Both motors at 100% reverse
+void Diag_TestMotorLeftTurn(void);         // Left turn: M1 forward, M2 reverse
+void Diag_TestMotorRightTurn(void);        // Right turn: M1 reverse, M2 forward
+void Diag_TestMotorFeedback(uint16_t duration_ms);  // Monitor feedback consistency
+
+// Tank drive tests (using mixed MD/MT commands)
+void Diag_TestTankDriveForward(void);      // Tank drive forward at full speed
+void Diag_TestTankDriveReverse(void);      // Tank drive reverse at full speed
+void Diag_TestTankDriveTurnLeft(void);     // Tank drive left turn
+void Diag_TestTankDriveTurnRight(void);    // Tank drive right turn
+
 // Test single salt dispersion rate (0-100%)
 void Diag_TestSaltRate(uint8_t rate_percent);
 

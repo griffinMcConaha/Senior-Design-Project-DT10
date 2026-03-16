@@ -191,6 +191,329 @@ void Diag_TestMotorSweep(uint16_t delay_ms)
     Console_ShowTestMenu();
 }
 
+// ============================================================================
+// EXPLICIT MOTOR TESTS
+// ============================================================================
+
+// Full forward: both motors at 100% speed
+void Diag_TestMotorFullForward(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== FULL FORWARD TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will move forward at full speed!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Applying 100%% forward to both motors...\r\n\r\n" ANSI_RESET);
+
+    Sabertooth_SetM1(100);
+    Sabertooth_SetM2(100);
+    printf(ANSI_GREEN "[DIAG] M1 = 100%% (forward)\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] M2 = 100%% (forward)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    // Wait for ESC
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== FULL FORWARD TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
+// Full reverse: both motors at 100% reverse speed
+void Diag_TestMotorFullReverse(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== FULL REVERSE TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will move backward at full speed!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Applying -100%% (full reverse) to both motors...\r\n\r\n" ANSI_RESET);
+
+    Sabertooth_SetM1(-100);
+    Sabertooth_SetM2(-100);
+    printf(ANSI_GREEN "[DIAG] M1 = -100%% (reverse)\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] M2 = -100%% (reverse)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    // Wait for ESC
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== FULL REVERSE TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
+// Left turn: M1 forward, M2 reverse
+void Diag_TestMotorLeftTurn(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== LEFT TURN TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will rotate left!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Applying diff drive for left turn...\r\n\r\n" ANSI_RESET);
+
+    Sabertooth_SetM1(100);   // Right motor forward
+    Sabertooth_SetM2(-100);  // Left motor reverse
+    printf(ANSI_GREEN "[DIAG] M1 = +100%% (forward)  - Right side\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] M2 = -100%% (reverse) - Left side\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Expected: Robot rotates left (counterclockwise)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    // Wait for ESC
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== LEFT TURN TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
+// Right turn: M1 reverse, M2 forward
+void Diag_TestMotorRightTurn(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== RIGHT TURN TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will rotate right!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Applying diff drive for right turn...\r\n\r\n" ANSI_RESET);
+
+    Sabertooth_SetM1(-100);  // Right motor reverse
+    Sabertooth_SetM2(100);   // Left motor forward
+    printf(ANSI_GREEN "[DIAG] M1 = -100%% (reverse) - Right side\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] M2 = +100%% (forward) - Left side\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Expected: Robot rotates right (clockwise)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    // Wait for ESC
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== RIGHT TURN TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
+// Monitor motor feedback consistency for a period
+void Diag_TestMotorFeedback(uint16_t duration_ms)
+{
+    extern UART_HandleTypeDef huart2;
+    uint32_t start_time = HAL_GetTick();
+    uint32_t feedback_count = 0;
+    uint32_t print_interval = 200;  // Print summary every 200ms
+    uint32_t last_print = 0;
+
+    printf(ANSI_CYAN "[DIAG] ========== MOTOR FEEDBACK MONITOR ==========\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] Duration: %u ms\r\n" ANSI_RESET, duration_ms);
+    printf(ANSI_CYAN "[DIAG] Monitoring battery voltage, motor currents, and temperatures...\r\n\r\n" ANSI_RESET);
+    printf("Time(ms) | Battery(V) | M1 Curr(A) | M2 Curr(A) | M1 Temp(C) | M2 Temp(C)\r\n");
+    printf("---------|------------|------------|------------|------------|------------\r\n");
+
+    while ((HAL_GetTick() - start_time) < duration_ms) {
+        Diag_WatchdogKick();
+
+        uint32_t elapsed = HAL_GetTick() - start_time;
+        if ((elapsed - last_print) >= print_interval) {
+            last_print = elapsed;
+            
+            // Polling happens in Sabertooth_PollFeedback() which queries every 100ms
+            // Get current values
+            float battery = Sabertooth_GetBatteryVoltage();
+            float m1_current = Sabertooth_GetMotorCurrent(1);
+            float m2_current = Sabertooth_GetMotorCurrent(2);
+            int m1_temp = Sabertooth_GetTemperature(1);
+            int m2_temp = Sabertooth_GetTemperature(2);
+
+            printf("%7u | %10.1f | %10.1f | %10.1f | %10d | %10d\r\n",
+                   elapsed, battery, m1_current, m2_current, m1_temp, m2_temp);
+
+            feedback_count++;
+        }
+
+        // Allow ESC to exit early
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) {
+                printf(ANSI_YELLOW "\r\n[DIAG] ESC pressed. Exiting feedback monitor.\r\n" ANSI_RESET);
+                break;
+            }
+        }
+        if (Console_CheckEscPressed()) {
+            printf(ANSI_YELLOW "\r\n[DIAG] ESC pressed. Exiting feedback monitor.\r\n" ANSI_RESET);
+            break;
+        }
+
+        HAL_Delay(50);
+    }
+
+    printf("\r\n" ANSI_YELLOW "[DIAG] ========== FEEDBACK MONITOR COMPLETE ==========\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] Total samples collected: %u\r\n\r\n" ANSI_RESET, feedback_count);
+    Console_ShowTestMenu();
+}
+
+// ============================================================================
+// TANK DRIVE TESTS (using mixed MD/MT commands)
+// ============================================================================
+
+// Tank drive forward at full speed
+void Diag_TestTankDriveForward(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== TANK DRIVE FORWARD TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will move forward at full speed!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Using mixed drive mode (MD/MT commands)...\r\n\r\n" ANSI_RESET);
+
+    Sabertooth_SetMixedDrive(100);   // Full forward
+    Sabertooth_SetMixedTurn(0);      // No turn
+    printf(ANSI_GREEN "[DIAG] MD = +100 (drive forward)\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] MT = 0 (no turn)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== TANK DRIVE FORWARD TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
+// Tank drive reverse at full speed
+void Diag_TestTankDriveReverse(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== TANK DRIVE REVERSE TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will move backward at full speed!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Using mixed drive mode (MD/MT commands)...\r\n\r\n" ANSI_RESET);
+
+    Sabertooth_SetMixedDrive(-100);  // Full reverse
+    Sabertooth_SetMixedTurn(0);      // No turn
+    printf(ANSI_GREEN "[DIAG] MD = -100 (drive reverse)\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] MT = 0 (no turn)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== TANK DRIVE REVERSE TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
+// Tank drive left turn
+void Diag_TestTankDriveTurnLeft(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== TANK DRIVE LEFT TURN TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will rotate left!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Using mixed drive mode (MD/MT commands)...\r\n\r\n" ANSI_RESET);
+
+    // Move forward while turning left
+    Sabertooth_SetMixedDrive(50);    // Half speed forward
+    Sabertooth_SetMixedTurn(-100);   // Full left turn
+    printf(ANSI_GREEN "[DIAG] MD = +50 (drive forward)\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] MT = -100 (full left turn)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Expected: Robot moves forward and curves left\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== TANK DRIVE LEFT TURN TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
+// Tank drive right turn
+void Diag_TestTankDriveTurnRight(void)
+{
+    extern UART_HandleTypeDef huart2;
+
+    printf(ANSI_CYAN "[DIAG] ========== TANK DRIVE RIGHT TURN TEST ==========\r\n" ANSI_RESET);
+    printf(ANSI_RED "[DIAG] WARNING: Robot will rotate right!\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Using mixed drive mode (MD/MT commands)...\r\n\r\n" ANSI_RESET);
+
+    // Move forward while turning right
+    Sabertooth_SetMixedDrive(50);    // Half speed forward
+    Sabertooth_SetMixedTurn(100);    // Full right turn
+    printf(ANSI_GREEN "[DIAG] MD = +50 (drive forward)\r\n" ANSI_RESET);
+    printf(ANSI_GREEN "[DIAG] MT = +100 (full right turn)\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Expected: Robot moves forward and curves right\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "[DIAG] Press ESC to stop\r\n\r\n" ANSI_RESET);
+
+    while (1) {
+        Diag_WatchdogKick();
+        if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+            uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            if (ch == 0x1B) break;
+        }
+        if (Console_CheckEscPressed()) break;
+        HAL_Delay(100);
+    }
+
+    Sabertooth_StopAll();
+    printf("\r\n" ANSI_GREEN "[DIAG] Motors stopped\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "[DIAG] ========== TANK DRIVE RIGHT TURN TEST COMPLETE ==========\r\n\r\n" ANSI_RESET);
+    Console_ShowTestMenu();
+}
+
 // Test single salt dispersion rate (0-100%)
 void Diag_TestSaltRate(uint8_t rate_percent)
 {

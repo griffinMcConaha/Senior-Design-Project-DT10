@@ -11,6 +11,14 @@ static UART_HandleTypeDef *s_huart = NULL;
 static int s_m1_speed = 0;
 static int s_m2_speed = 0;
 
+// Store mixed mode values
+static int s_mixed_drive = 0;  // MD command value
+static int s_mixed_turn = 0;   // MT command value
+
+// Store ramp rates
+static int s_ramp_m1 = 0;      // R1 command value
+static int s_ramp_m2 = 0;      // R2 command value
+
 // Track last successful command for health monitoring
 static uint32_t s_last_cmd_ms = 0;
 
@@ -241,9 +249,8 @@ int Sabertooth_GetTemperature(uint8_t motor)
 // Handle UART RX completion callback
 void Sabertooth_RxCallback(void)
 {
-    // Response received, parse it
+    // Response already parsed in Sabertooth_ProcessRxByte(), just clear flags
     if (s_rx_complete) {
-        sabertooth_parse_response();
         s_rx_complete = 0;
         s_rx_index = 0;
     }
@@ -347,4 +354,83 @@ void Sabertooth_ProcessRxByte(uint8_t byte)
         HAL_UART_Receive_IT(s_huart, &s_rx_buffer[s_rx_index], 1);
     }
 }
+
+// ============================================================================
+// MIXED MODE (Tank Drive) Control
+// ============================================================================
+
+// Set mixed drive (forward/backward) for tank mode
+void Sabertooth_SetMixedDrive(int drive)
+{
+    // Clamp drive to valid range
+    if (drive > SABERTOOTH_PERCENT_MAX) drive = SABERTOOTH_PERCENT_MAX;
+    if (drive < -SABERTOOTH_PERCENT_MAX) drive = -SABERTOOTH_PERCENT_MAX;
+
+    s_mixed_drive = drive;
+
+    // Scale -100..+100 to -2047..+2047
+    int scaled_drive = (drive * SABERTOOTH_CMD_MAX) / SABERTOOTH_PERCENT_MAX;
+    
+    // Send Plain Text Serial command: MD: <value>
+    char cmd[16];
+    snprintf(cmd, sizeof(cmd), "MD: %d\r\n", scaled_drive);
+    printf("[MIXED] Drive: %d%% (scaled: %d)\r\n", drive, scaled_drive);
+    sabertooth_send_command(cmd);
+}
+
+// Set mixed turn (left/right) for tank mode
+void Sabertooth_SetMixedTurn(int turn)
+{
+    // Clamp turn to valid range
+    if (turn > SABERTOOTH_PERCENT_MAX) turn = SABERTOOTH_PERCENT_MAX;
+    if (turn < -SABERTOOTH_PERCENT_MAX) turn = -SABERTOOTH_PERCENT_MAX;
+
+    s_mixed_turn = turn;
+
+    // Scale -100..+100 to -2047..+2047
+    int scaled_turn = (turn * SABERTOOTH_CMD_MAX) / SABERTOOTH_PERCENT_MAX;
+    
+    // Send Plain Text Serial command: MT: <value>
+    char cmd[16];
+    snprintf(cmd, sizeof(cmd), "MT: %d\r\n", scaled_turn);
+    printf("[MIXED] Turn: %d%% (scaled: %d)\r\n", turn, scaled_turn);
+    sabertooth_send_command(cmd);
+}
+
+// ============================================================================
+// RAMP RATE Control
+// ============================================================================
+
+// Set ramp rate for motor 1
+void Sabertooth_SetRampM1(int rate)
+{
+    // Clamp rate to valid range
+    if (rate > SABERTOOTH_CMD_MAX) rate = SABERTOOTH_CMD_MAX;
+    if (rate < 0) rate = 0;
+
+    s_ramp_m1 = rate;
+
+    // Send Plain Text Serial command: R1: <value>
+    char cmd[16];
+    snprintf(cmd, sizeof(cmd), "R1: %d\r\n", rate);
+    printf("[RAMP] M1 ramp rate: %d\r\n", rate);
+    sabertooth_send_command(cmd);
+}
+
+// Set ramp rate for motor 2
+void Sabertooth_SetRampM2(int rate)
+{
+    // Clamp rate to valid range
+    if (rate > SABERTOOTH_CMD_MAX) rate = SABERTOOTH_CMD_MAX;
+    if (rate < 0) rate = 0;
+
+    s_ramp_m2 = rate;
+
+    // Send Plain Text Serial command: R2: <value>
+    char cmd[16];
+    snprintf(cmd, sizeof(cmd), "R2: %d\r\n", rate);
+    printf("[RAMP] M2 ramp rate: %d\r\n", rate);
+    sabertooth_send_command(cmd);
+}
+
 

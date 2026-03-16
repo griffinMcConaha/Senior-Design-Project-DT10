@@ -377,10 +377,19 @@ void Console_ShowTestMenu(void)
     printf("0. TEST MOTORSWEEP - Sweep motor speeds (percent)\r\n");
     printf("H. TEST HEALTH    - System health diagnostic\r\n");
     printf("C. TEST RAWCMD M2: 500 - Send raw Sabertooth command\r\n");
-    printf(ANSI_CYAN "I. TEST I2C       - Scan I2C bus\r\n");
+    printf(ANSI_CYAN "F. TEST FORWARD   - Both motors full speed FORWARD\r\n");
+    printf("B. TEST REVERSE   - Both motors full speed REVERSE\r\n");
+    printf("V. TEST LEFTTURN  - Left turn (M1 forward, M2 reverse)\r\n");
+    printf("N. TEST RIGHTTURN - Right turn (M1 reverse, M2 forward)\r\n");
+    printf("K. TEST FEEDBACK 5000 - Monitor motor feedback for 5 seconds\r\n");
+    printf("Y. TEST TANKFORWARD - Tank drive forward (mixed mode MD)\r\n");
+    printf("Z. TEST TANKREVERSE - Tank drive reverse (mixed mode MD)\r\n");
+    printf("G. TEST TANKLEFT  - Tank drive forward + left turn\r\n");
+    printf("H. TEST TANKRIGHT - Tank drive forward + right turn\r\n");
+    printf("I. TEST I2C       - Scan I2C bus\r\n");
     printf("D. TEST IMUDETAIL - Detailed IMU check\r\n");
-    printf("L. TEST LORA SEND - Type and send raw LoRa string\r\n");
-    printf("R. TEST LORA RX   - Monitor incoming LoRa messages (press ESC)\r\n");
+    printf("J. TEST LORA SEND - Type and send raw LoRa string\r\n");
+    printf("U. TEST LORA RX   - Monitor incoming LoRa messages (press ESC)\r\n");
     printf("X. TEST LORACMDS  - Send example LoRa control command set\r\n");
     printf("E. TEST SBESP SEND - Type and send Salt-Brine ESP32 string\r\n");
     printf("Q. TEST SBESP RX   - Monitor Salt-Brine ESP32 RX (press ESC)\r\n");
@@ -639,6 +648,81 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
         Diag_MonitorSabertoothFeedback();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    // New explicit motor test shortcuts
+    if (strcmp(cmd_upper, "F") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestMotorFullForward();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "B") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestMotorFullReverse();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    // Left/Right turn tests (use V and N as shortcuts)
+    if (strcmp(cmd_upper, "V") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestMotorLeftTurn();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "N") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestMotorRightTurn();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "K") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestMotorFeedback(5000);  // Default 5 seconds
+        Console_ShowTestMenu();
+        return;
+    }
+
+    // Tank drive tests (Y, Z, G, H)
+    if (strcmp(cmd_upper, "Y") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestTankDriveForward();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "Z") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestTankDriveReverse();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "G") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestTankDriveTurnLeft();
+        Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "H") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Diag_TestTankDriveTurnRight();
         Console_ShowTestMenu();
         return;
     }
@@ -1043,6 +1127,68 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 Diag_TestMotor((uint8_t)motor, speed);
             else
                 printf("[DIAG] Usage: TEST MOTOR <1|2> <speed>\r\n");
+            return;
+        }
+
+        // TEST FORWARD (full forward on both motors)
+        if (strncmp(subcmd_up, "FORWARD", 7) == 0) {
+            Diag_TestMotorFullForward();
+            return;
+        }
+
+        // TEST REVERSE (full reverse on both motors)
+        if (strncmp(subcmd_up, "REVERSE", 7) == 0) {
+            Diag_TestMotorFullReverse();
+            return;
+        }
+
+        // TEST LEFTTURN (left turn test)
+        if (strncmp(subcmd_up, "LEFTTURN", 8) == 0) {
+            Diag_TestMotorLeftTurn();
+            return;
+        }
+
+        // TEST RIGHTTURN (right turn test)
+        if (strncmp(subcmd_up, "RIGHTTURN", 9) == 0) {
+            Diag_TestMotorRightTurn();
+            return;
+        }
+
+        // TEST FEEDBACK <duration_ms> (monitor feedback consistency)
+        if (strncmp(subcmd_up, "FEEDBACK", 8) == 0) {
+            subcmd_up += 8;
+            subcmd_orig += 8;
+            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
+                subcmd_up++;
+                subcmd_orig++;
+            }
+            uint16_t duration = 5000;  // Default 5 seconds
+            sscanf(subcmd_orig, "%hu", &duration);
+            Diag_TestMotorFeedback(duration);
+            return;
+        }
+
+        // TEST TANKFORWARD (tank drive forward using mixed mode)
+        if (strncmp(subcmd_up, "TANKFORWARD", 11) == 0) {
+            Diag_TestTankDriveForward();
+            return;
+        }
+
+        // TEST TANKREVERSE (tank drive reverse using mixed mode)
+        if (strncmp(subcmd_up, "TANKREVERSE", 11) == 0) {
+            Diag_TestTankDriveReverse();
+            return;
+        }
+
+        // TEST TANKLEFT (tank drive forward + left turn)
+        if (strncmp(subcmd_up, "TANKLEFT", 8) == 0) {
+            Diag_TestTankDriveTurnLeft();
+            return;
+        }
+
+        // TEST TANKRIGHT (tank drive forward + right turn)
+        if (strncmp(subcmd_up, "TANKRIGHT", 9) == 0) {
+            Diag_TestTankDriveTurnRight();
             return;
         }
 
