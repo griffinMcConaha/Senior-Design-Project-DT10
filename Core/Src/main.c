@@ -147,6 +147,44 @@ static uint8_t Console_HandleStartupBypassKey(uint8_t ch)
   return 0;
 }
 
+static const char *LoRaStateName(uint8_t state)
+{
+  switch (state)
+  {
+    case STATE_MANUAL: return "MANUAL";
+    case STATE_AUTO:   return "AUTO";
+    case STATE_PAUSE:  return "PAUSE";
+    case STATE_ERROR:  return "ERROR";
+    case STATE_ESTOP:  return "ESTOP";
+    default:           return "UNKNOWN";
+  }
+}
+
+static void LoRa_SendMainLoopAck(const char *prefix, const char *payload)
+{
+  char ack_msg[96];
+  size_t payload_len = 0;
+
+  if (!prefix || prefix[0] == '\0') {
+    prefix = "ACK:RX";
+  }
+
+  if (payload && payload[0] != '\0') {
+    payload_len = strcspn(payload, "\r\n");
+    if (payload_len > 48u) {
+      payload_len = 48u;
+    }
+  }
+
+  if (payload_len > 0u) {
+    snprintf(ack_msg, sizeof(ack_msg), "%s:%.*s", prefix, (int)payload_len, payload);
+  } else {
+    snprintf(ack_msg, sizeof(ack_msg), "%s", prefix);
+  }
+
+  LoRA_SendRaw(ack_msg);
+}
+
 static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
 {
   int m1_speed = 0;
@@ -432,6 +470,8 @@ int main(void)
   printf("[UART MAP] SB-ESP: UART4 TX=PC10 RX=PC11 @9600\r\n");
   printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @115200\r\n");
   Mission_Init();    // Initialize mission management module
+  HAL_Delay(200);   // Allow SB-ESP time to be ready before issuing safe-state commands
+  Console_SendSafeState(); // Zero all TC-controllable outputs on startup
   HAL_Delay(100);
 
   imu_last_update_ms = HAL_GetTick();
@@ -501,7 +541,7 @@ int main(void)
   uint32_t last_50hz_ms = HAL_GetTick();
   uint32_t last_1hz_ms = HAL_GetTick();
   uint32_t last_lora_tx_ms = HAL_GetTick();
-  const uint32_t lora_tx_interval_ms = 10000;
+  const uint32_t lora_tx_interval_ms = 3000;
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
     uint8_t startup_mode_sent = 0;
     uint8_t last_test_mode_seen = g_test_mode;
@@ -596,9 +636,21 @@ int main(void)
           // Check for incoming LoRA commands and forward to state machine
           uint8_t lora_handled = 0;
           uint8_t lora_cmd = 0;
+            uint32_t raw_count = LoRA_GetRawFrameCount();
+            const char *raw_frame = NULL;
+
+            if (raw_count != last_lora_raw_count_seen) {
+              last_lora_raw_count_seen = raw_count;
+              raw_frame = LoRA_GetLastRawFrame();
+              if (raw_frame && raw_frame[0] != '\0') {
+                printf("[MAIN] LoRa RX raw[%lu]: %s\r\n", raw_count, raw_frame);
+              }
+            }
+
           if (LoRA_GetPendingCommand(&lora_cmd)) {
               RobotSM_Request(&g_sm, (RobotState_t)lora_cmd);
               const char *lora_raw = LoRA_GetLastCommand();
+              LoRa_SendMainLoopAck("ACK:STATE", LoRaStateName(lora_cmd));
               printf("[APP CMD RECEIVED] state=%u\r\n", lora_cmd);
               printf("[LoRa] command received: %s -> state=%u\r\n",
                  (lora_raw && lora_raw[0] != '\0') ? lora_raw : "<empty>",
@@ -613,16 +665,14 @@ int main(void)
             }
 
             if (!lora_handled) {
-              uint32_t raw_count = LoRA_GetRawFrameCount();
-              if (raw_count != last_lora_raw_count_seen) {
-                last_lora_raw_count_seen = raw_count;
-                const char *raw_frame = LoRA_GetLastRawFrame();
+              if (raw_frame && raw_frame[0] != '\0') {
                 LoRA_ManualCommand_t fallback_manual = LORA_MANUAL_CMD_NONE;
                 uint8_t fallback_state = 0;
                 uint8_t fallback_is_state = 0;
                 if (ParseLoRaJsonCmdInMain(raw_frame, &fallback_manual, &fallback_state, &fallback_is_state)) {
                   if (fallback_is_state) {
                     RobotSM_Request(&g_sm, (RobotState_t)fallback_state);
+                    LoRa_SendMainLoopAck("ACK:JSONSTATE", LoRaStateName(fallback_state));
                     printf("[APP CMD RECEIVED] json_state=%u\r\n", fallback_state);
                     printf("[LoRa] JSON command received (main): %s -> state=%u\r\n",
                            (raw_frame && raw_frame[0] != '\0') ? raw_frame : "<empty>",
@@ -630,6 +680,10 @@ int main(void)
                   } else {
                     HandleLoRaManualCommand(fallback_manual);
                   }
+                } else {
+                  LoRa_SendMainLoopAck("ACK:RAW", raw_frame);
+                  printf("[MAIN] LoRa RX acknowledged (unhandled): %s\r\n",
+                         (raw_frame && raw_frame[0] != '\0') ? raw_frame : "<empty>");
                 }
               }
             }

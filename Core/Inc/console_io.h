@@ -12,6 +12,7 @@
 #include "robot_sm.h"
 
 /* ANSI terminal color codes */
+#define ANSI_BOLD    "\033[1m"
 #define ANSI_RESET   "\033[0m"
 #define ANSI_RED     "\033[31m"
 #define ANSI_GREEN   "\033[32m"
@@ -55,6 +56,9 @@ uint8_t Console_CheckEscPressed(void);
 
 /** @brief Process serial command and update robot state if valid */
 void Console_ProcessCommand(const char *cmd, RobotSM_t *sm);
+
+/** @brief Send safe/zero state to all TC-controllable outputs (call after peripheral init on startup) */
+void Console_SendSafeState(void);
 
 /** @brief Show quick test menu */
 void Console_ShowTestMenu(void);

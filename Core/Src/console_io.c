@@ -37,6 +37,265 @@ static int ParseTwoInts(const char *s, int *out_a, int *out_b)
     return (found == 2);
 }
 
+static int Console_ParseKeyedPercent(const char *input, const char *key_upper, int *out_value)
+{
+    if (!input || !key_upper || !out_value) return 0;
+
+    char upper[192] = {0};
+    size_t len = strnlen(input, sizeof(upper) - 1);
+    for (size_t i = 0; i < len; i++) {
+        upper[i] = (char)toupper((unsigned char)input[i]);
+    }
+    upper[len] = '\0';
+
+    const char *hit = strstr(upper, key_upper);
+    if (!hit) return 0;
+
+    size_t idx = (size_t)(hit - upper) + strlen(key_upper);
+    const char *p = input + idx;
+
+    while (*p && (isspace((unsigned char)*p) || *p == ':' || *p == '=')) {
+        p++;
+    }
+
+    if (!*p) return 0;
+
+    char *end = NULL;
+    long value = strtol(p, &end, 10);
+    if (p == end) return 0;
+
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
+
+    *out_value = (int)value;
+    return 1;
+}
+
+static const char *Console_SkipCommandDelims(const char *s)
+{
+    while (s && (*s == ' ' || *s == '\t' || *s == ',' || *s == ';')) {
+        s++;
+    }
+    return s;
+}
+
+static void Console_NormalizeCommandText(const char *input, char *output, size_t output_size, uint8_t uppercase)
+{
+    if (!output || output_size == 0) return;
+
+    output[0] = '\0';
+    if (!input) return;
+
+    const char *start = input;
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+
+    const char *end = start + strlen(start);
+    while (end > start && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+
+    size_t out_idx = 0;
+    uint8_t last_was_space = 0;
+    for (const char *p = start; p < end && out_idx < (output_size - 1); ++p) {
+        unsigned char ch = (unsigned char)*p;
+        if (isspace(ch)) {
+            if (!last_was_space) {
+                output[out_idx++] = ' ';
+                last_was_space = 1;
+            }
+            continue;
+        }
+
+        output[out_idx++] = uppercase ? (char)toupper(ch) : (char)ch;
+        last_was_space = 0;
+    }
+
+    if (out_idx > 0 && output[out_idx - 1] == ' ') {
+        out_idx--;
+    }
+    output[out_idx] = '\0';
+}
+
+static int Console_IsLikelyCommandStart(const char *text)
+{
+    char normalized[48] = {0};
+    Console_NormalizeCommandText(text, normalized, sizeof(normalized), 1);
+    if (normalized[0] == '\0') return 0;
+
+    if ((normalized[0] >= '0' && normalized[0] <= '9')
+        && (normalized[1] == '\0' || normalized[1] == ' ')) {
+        return 1;
+    }
+
+    if (strchr("TABVFBNKYZGHMOWEQJULRXSIPD?", normalized[0]) != NULL
+        && (normalized[1] == '\0' || normalized[1] == ' ')) {
+        return 1;
+    }
+
+    if ((normalized[0] == 'M')
+        && ((normalized[1] == '1') || (normalized[1] == '2'))
+        && (normalized[2] == ':' || normalized[2] == ' ' || normalized[2] == '\0')) {
+        return 1;
+    }
+
+    static const char *words[] = {
+        "TEST", "HELP", "EXIT", "ESTOP", "RESET", "PAUSE", "AUTO", "MANUAL",
+        "FORWARD", "REVERSE", "LEFTTURN", "RIGHTTURN",
+        "TANKFORWARD", "TANKREVERSE", "TANKLEFT", "TANKRIGHT",
+        "SALT:", "BRINE:", "PCT:",
+        "AGITATOR", "THROWER", "RELAY",
+        "STARTUP_CHECK", "STARTUP_BYPASS",
+        "SBESP", "LORA", "CTRL", "TC", "CTRLHELP"
+    };
+
+    for (size_t i = 0; i < (sizeof(words) / sizeof(words[0])); ++i) {
+        size_t word_len = strlen(words[i]);
+        if (strncmp(normalized, words[i], word_len) == 0) {
+            if (normalized[word_len] == '\0'
+                || normalized[word_len] == ' '
+                || normalized[word_len] == ':'
+                || normalized[word_len] == '=') {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static int Console_ShouldSplitAtComma(const char *input, size_t segment_start, size_t comma_index)
+{
+    const char *next = Console_SkipCommandDelims(input + comma_index + 1);
+    if (!next || *next == '\0' || !Console_IsLikelyCommandStart(next)) {
+        return 0;
+    }
+
+    char current[192] = {0};
+    size_t span_len = (comma_index > segment_start) ? (comma_index - segment_start) : 0;
+    if (span_len >= sizeof(current)) {
+        span_len = sizeof(current) - 1;
+    }
+    memcpy(current, input + segment_start, span_len);
+    current[span_len] = '\0';
+    Console_NormalizeCommandText(current, current, sizeof(current), 1);
+
+    char next_norm[48] = {0};
+    Console_NormalizeCommandText(next, next_norm, sizeof(next_norm), 1);
+
+    if ((strncmp(current, "TEST SBESP ", 11) == 0)
+        || (strncmp(current, "TEST DISP ", 10) == 0)
+        || (strncmp(current, "TEST LORA ", 10) == 0)
+        || (strncmp(current, "TEST RAWCMD ", 12) == 0)
+        || (strncmp(current, "M1:", 3) == 0)
+        || (strncmp(current, "M2:", 3) == 0)) {
+        return 0;
+    }
+
+    if ((strstr(current, "SALT:") != NULL) && (strncmp(next_norm, "BRINE:", 6) == 0)) {
+        return 0;
+    }
+
+    if ((strstr(current, "BRINE:") != NULL) && (strncmp(next_norm, "SALT:", 5) == 0)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static void Console_ForceAllOutputsOff(const char *reason)
+{
+    Sabertooth_StopAll();
+    Stop_Motors();
+    Dispersion_SetRateDirect(0, 0);
+    Dispersion_SendRaw("AGITATOR OFF");
+    Dispersion_SendRaw("THROWER OFF");
+    Dispersion_SendRaw("RELAY OFF");
+
+    if (reason && reason[0] != '\0') {
+        printf("\r\n[DIAG] Safe OFF applied (%s)\r\n", reason);
+    } else {
+        printf("\r\n[DIAG] Safe OFF applied\r\n");
+    }
+}
+
+void Console_SendSafeState(void)
+{
+    Console_ForceAllOutputsOff("startup");
+}
+
+static int Console_TryHandleMixedMotorPercentCommand(const char *input);
+
+static int Console_TryProcessCommandSequence(const char *input, RobotSM_t *sm)
+{
+    if (!input || !sm) return 0;
+
+    size_t len = strlen(input);
+    size_t start = 0;
+    int commands_found = 0;
+
+    for (size_t i = 0; i <= len; ++i) {
+        int split_here = 0;
+        if (input[i] == '\0' || input[i] == ';') {
+            split_here = 1;
+        } else if (input[i] == ',' && Console_ShouldSplitAtComma(input, start, i)) {
+            split_here = 1;
+        }
+
+        if (!split_here) continue;
+
+        char fragment[192] = {0};
+        size_t frag_len = (i > start) ? (i - start) : 0;
+        if (frag_len >= sizeof(fragment)) {
+            frag_len = sizeof(fragment) - 1;
+        }
+        memcpy(fragment, input + start, frag_len);
+        fragment[frag_len] = '\0';
+        Console_NormalizeCommandText(fragment, fragment, sizeof(fragment), 0);
+        if (fragment[0] != '\0') {
+            commands_found++;
+        }
+        start = i + 1;
+    }
+
+    if (commands_found <= 1) {
+        return 0;
+    }
+
+    printf("[DIAG] Running %d commands\r\n", commands_found);
+    start = 0;
+    for (size_t i = 0; i <= len; ++i) {
+        int split_here = 0;
+        if (input[i] == '\0' || input[i] == ';') {
+            split_here = 1;
+        } else if (input[i] == ',' && Console_ShouldSplitAtComma(input, start, i)) {
+            split_here = 1;
+        }
+
+        if (!split_here) continue;
+
+        char fragment[192] = {0};
+        size_t frag_len = (i > start) ? (i - start) : 0;
+        if (frag_len >= sizeof(fragment)) {
+            frag_len = sizeof(fragment) - 1;
+        }
+        memcpy(fragment, input + start, frag_len);
+        fragment[frag_len] = '\0';
+        Console_NormalizeCommandText(fragment, fragment, sizeof(fragment), 0);
+        if (fragment[0] != '\0') {
+            if (Console_TryHandleMixedMotorPercentCommand(fragment)) {
+                start = i + 1;
+                continue;
+            }
+            Console_ProcessCommand(fragment, sm);
+        }
+        start = i + 1;
+    }
+
+    return 1;
+}
+
 // Module-level pointer for printf redirection (USART2 by default)
 static UART_HandleTypeDef *g_printf_uart = NULL;
 
@@ -117,9 +376,9 @@ void Console_PrintStatus(const ConsoleIO_t *c,
     const uint32_t disp_rx_stale_ms = 30000u;
 
     uint32_t disp_tx_count = Dispersion_GetTxCount();
-    uint32_t disp_rx_count = Dispersion_GetRxCount();
+    uint32_t disp_rx_count = Dispersion_GetRawRxByteCount();
     uint32_t lora_tx_count = LoRA_GetTxCount();
-    uint32_t lora_rx_count = LoRA_GetRxCount();
+    uint32_t lora_rx_count = LoRA_GetRawFrameCount();
 
     static uint32_t prev_disp_tx_count = 0;
     static uint32_t prev_disp_rx_count = 0;
@@ -237,6 +496,7 @@ static int Console_ReadLineBlocking(const char *prompt, char *out, size_t out_si
             uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
 
             if (ch == 0x1B) {
+                Console_ForceAllOutputsOff("ESC");
                 printf("\r\n[DIAG] Input cancelled\r\n");
                 out[0] = '\0';
                 return 0;
@@ -336,8 +596,8 @@ static void Console_NormalizeSbEspCommand(const char *input, char *output, size_
     output[0] = '\0';
     if (!input || input[0] == '\0') return;
 
-    int first = 0;
-    int second = 0;
+    int salt = 0;
+    int brine = 0;
 
     char upper[160] = {0};
     size_t len = strnlen(input, sizeof(upper) - 1);
@@ -346,12 +606,21 @@ static void Console_NormalizeSbEspCommand(const char *input, char *output, size_
     }
     upper[len] = '\0';
 
-    if (strstr(upper, "SALT") && strstr(upper, "BRINE") && ParseTwoInts(input, &first, &second)) {
-        if (first < 0) first = 0;
-        if (first > 100) first = 100;
-        if (second < 0) second = 0;
-        if (second > 100) second = 100;
-        snprintf(output, output_size, "SALT:%d,BRINE:%d", first, second);
+    int have_salt = Console_ParseKeyedPercent(input, "SALT", &salt);
+    int have_brine = Console_ParseKeyedPercent(input, "BRINE", &brine);
+
+    if (have_salt && have_brine) {
+        snprintf(output, output_size, "SALT:%d,BRINE:%d", salt, brine);
+        return;
+    }
+
+    if (have_salt) {
+        snprintf(output, output_size, "SALT:%d", salt);
+        return;
+    }
+
+    if (have_brine) {
+        snprintf(output, output_size, "BRINE:%d", brine);
         return;
     }
 
@@ -359,49 +628,238 @@ static void Console_NormalizeSbEspCommand(const char *input, char *output, size_
     output[output_size - 1] = '\0';
 }
 
+static int Console_IsDirectSbEspControlCommand(const char *input)
+{
+    if (!input || input[0] == '\0') return 0;
+
+    char upper[160] = {0};
+    size_t len = strnlen(input, sizeof(upper) - 1);
+    for (size_t i = 0; i < len; i++) {
+        upper[i] = (char)toupper((unsigned char)input[i]);
+    }
+    upper[len] = '\0';
+
+    if (strncmp(upper, "AGITATOR ", 9) == 0) return 1;
+    if (strncmp(upper, "THROWER ", 8) == 0) return 1;
+    if (strncmp(upper, "RELAY ", 6) == 0) return 1;
+    if (strncmp(upper, "STARTUP_CHECK", 13) == 0) return 1;
+    if (strncmp(upper, "STARTUP_BYPASS", 14) == 0) return 1;
+    if (strncmp(upper, "PCT:", 4) == 0) return 1;
+    int keyed_pct = 0;
+    if (Console_ParseKeyedPercent(input, "SALT", &keyed_pct)) return 1;
+    if (Console_ParseKeyedPercent(input, "BRINE", &keyed_pct)) return 1;
+    if (strstr(upper, "SALT:") != NULL && strstr(upper, "BRINE:") != NULL) return 1;
+    if (strncmp(upper, "TEST SALT", 9) == 0) return 1;
+    if (strncmp(upper, "TEST BRINE", 10) == 0) return 1;
+
+    return 0;
+}
+
+static void Console_SendSbEspCommandAndReport(const char *input)
+{
+    const char *before = Dispersion_GetLastStatus();
+    char before_buf[128] = {0};
+    if (before) {
+        strncpy(before_buf, before, sizeof(before_buf) - 1);
+        before_buf[sizeof(before_buf) - 1] = '\0';
+    }
+
+    char normalized[160] = {0};
+    Console_NormalizeSbEspCommand(input, normalized, sizeof(normalized));
+    if (strcmp(normalized, input) != 0) {
+        printf("[DIAG] SB-ESP normalized TX: %s\r\n", normalized);
+    }
+
+    Dispersion_SetTestResponseMode(1);
+    Dispersion_SendRaw(normalized);
+    HAL_Delay(400);
+
+    const char *after = Dispersion_GetLastStatus();
+    if (after && after[0] != '\0') {
+        if (strcmp(after, before_buf) != 0) {
+            printf("[DIAG] SB-ESP RX: %s\r\n", after);
+        } else {
+            printf("[DIAG] SB-ESP RX unchanged: %s\r\n", after);
+        }
+    } else {
+        printf("[DIAG] No response from SB-ESP\r\n");
+    }
+
+    Dispersion_SetTestResponseMode(0);
+}
+
+static int Console_TryHandleMixedMotorPercentCommand(const char *input)
+{
+    if (!input || input[0] == '\0') return 0;
+
+    int motor = 0;
+    int percent = 0;
+
+    if (sscanf(input, "M%d %d", &motor, &percent) == 2) {
+        if ((motor == 1 || motor == 2) && percent >= -100 && percent <= 100) {
+            Diag_TestMotor((uint8_t)motor, percent);
+            return 1;
+        }
+    }
+
+    if (sscanf(input, "%d %d", &motor, &percent) == 2) {
+        if ((motor == 1 || motor == 2) && percent >= -100 && percent <= 100) {
+            Diag_TestMotor((uint8_t)motor, percent);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void Console_ApplyFullActivationPreset(void)
+{
+    Dispersion_SetTestResponseMode(1);
+    Dispersion_SendRaw("SALT:100,BRINE:100,AGITATOR ON,THROWER ON,RELAY ON");
+    Dispersion_SendRaw("RELAY ON");
+
+    Sabertooth_SetM1(100);
+    Sabertooth_SetM2(100);
+
+    HAL_Delay(120);
+    Dispersion_SetTestResponseMode(0);
+
+    printf(ANSI_GREEN "[DIAG] FULL ACTIVATION APPLIED\r\n" ANSI_RESET);
+}
+
+static void Console_RunMixedControlShell(RobotSM_t *sm)
+{
+    if (s_test_mode_flag) *s_test_mode_flag = 1;
+
+    printf(ANSI_BOLD ANSI_CYAN "\r\n[DIAG] ===== MIXED CONTROL SHELL =====\r\n" ANSI_RESET);
+    printf("[DIAG] Use one prompt for motors and SB-ESP controls\r\n");
+    printf("[DIAG] Motor input is percent-based here: M1 30, M2 -30, or 1 30\r\n");
+    printf("[DIAG] Examples: SALT:25,BRINE:75, AGITATOR ON, THROWER OFF, RELAY ON\r\n");
+    printf("[DIAG] Full activation preset: ALLON (or FULLON)\r\n");
+    printf("[DIAG] Chain commands with ';' or ',' for demos: M1 30; AGITATOR ON; RELAY ON\r\n");
+    printf("[DIAG] Press ESC at the prompt to exit back to the test menu\r\n");
+    printf("[DIAG] Type HELP for normal commands, CTRLHELP for shell examples\r\n\r\n");
+
+    while (1) {
+        char control_text[160] = {0};
+        if (!Console_ReadLineBlocking("[CTRL] Enter command (ESC to exit): ", control_text, sizeof(control_text))) {
+            break;
+        }
+
+        if (control_text[0] == '\0') {
+            continue;
+        }
+
+        char normalized[160] = {0};
+        Console_NormalizeCommandText(control_text, normalized, sizeof(normalized), 0);
+        if (normalized[0] == '\0') {
+            continue;
+        }
+
+        char upper[160] = {0};
+        Console_NormalizeCommandText(normalized, upper, sizeof(upper), 1);
+
+        if (strcmp(upper, "CTRLHELP") == 0) {
+            printf("[DIAG] Mixed control examples:\r\n");
+            printf("[DIAG]   M1 30\r\n");
+            printf("[DIAG]   M2 -30\r\n");
+            printf("[DIAG]   1 30\r\n");
+            printf("[DIAG]   TEST MOTOR 1 30\r\n");
+            printf("[DIAG]   TEST RAWCMD M2: 500\r\n");
+            printf("[DIAG]   SALT:25,BRINE:75\r\n");
+            printf("[DIAG]   AGITATOR ON\r\n");
+            printf("[DIAG]   THROWER OFF\r\n");
+            printf("[DIAG]   RELAY ON\r\n");
+            printf("[DIAG]   M1 30; M2 -30; AGITATOR ON\r\n");
+            printf("[DIAG]   M1 100, M2 100, BRINE:100, SALT:100, AGITATOR ON, THROWER ON, RELAY ON\r\n");
+            printf("[DIAG]   ALLON\r\n");
+            printf("[DIAG]   STARTUP_BYPASS\r\n");
+            continue;
+        }
+
+        if (strcmp(upper, "ALLON") == 0 || strcmp(upper, "FULLON") == 0) {
+            Console_ApplyFullActivationPreset();
+            continue;
+        }
+
+        if (strcmp(upper, "EXIT") == 0) {
+            Console_ProcessCommand(control_text, sm);
+            return;
+        }
+
+        if (Console_TryHandleMixedMotorPercentCommand(normalized)) {
+            continue;
+        }
+
+        if (Console_IsDirectSbEspControlCommand(normalized)) {
+            Console_SendSbEspCommandAndReport(normalized);
+            continue;
+        }
+
+        Console_ProcessCommand(normalized, sm);
+    }
+
+    printf("[DIAG] Mixed control shell closed\r\n");
+    Console_ShowTestMenu();
+}
+
 void Console_ShowTestMenu(void)
 {
     // Clear console to remove old sensor status messages
     printf("\033[2J\033[H");
     
-    printf(ANSI_YELLOW "========== QUICK TEST MENU ==========" ANSI_RESET "\r\n");
-    printf("1. TEST ALL       - Run all diagnostics\r\n");
-    printf("2. TEST MOTOR 1 30 - Motor 1 forward (percent)\r\n");
-    printf("3. TEST MOTOR 2 30 - Motor 2 forward (percent)\r\n");
-    printf("4. TEST GPS       - GPS position + quality\r\n");
-    printf("5. TEST IMU       - Accel/Gyro/Magnetometer\r\n");
-    printf("6. TEST TEMP      - Temperature sensor\r\n");
-    printf("7. TEST SALT 50   - Salt pump 50%%\r\n");
-    printf("8. TEST BRINE 50  - Brine pump 50%%\r\n");
-    printf("9. TEST STATE     - Show current state\r\n");
-    printf("0. TEST MOTORSWEEP - Sweep motor speeds (percent)\r\n");
-    printf("H. TEST HEALTH    - System health diagnostic\r\n");
-    printf("C. TEST RAWCMD M2: 500 - Send raw Sabertooth command\r\n");
-    printf(ANSI_CYAN "F. TEST FORWARD   - Both motors full speed FORWARD\r\n");
-    printf("B. TEST REVERSE   - Both motors full speed REVERSE\r\n");
-    printf("V. TEST LEFTTURN  - Left turn (M1 forward, M2 reverse)\r\n");
-    printf("N. TEST RIGHTTURN - Right turn (M1 reverse, M2 forward)\r\n");
-    printf("K. TEST FEEDBACK 5000 - Monitor motor feedback for 5 seconds\r\n");
-    printf("Y. TEST TANKFORWARD - Tank drive forward (mixed mode MD)\r\n");
-    printf("Z. TEST TANKREVERSE - Tank drive reverse (mixed mode MD)\r\n");
-    printf("G. TEST TANKLEFT  - Tank drive forward + left turn\r\n");
-    printf("H. TEST TANKRIGHT - Tank drive forward + right turn\r\n");
-    printf("I. TEST I2C       - Scan I2C bus\r\n");
-    printf("D. TEST IMUDETAIL - Detailed IMU check\r\n");
-    printf("J. TEST LORA SEND - Type and send raw LoRa string\r\n");
-    printf("U. TEST LORA RX   - Monitor incoming LoRa messages (press ESC)\r\n");
-    printf("X. TEST LORACMDS  - Send example LoRa control command set\r\n");
-    printf("E. TEST SBESP SEND - Type and send Salt-Brine ESP32 string\r\n");
-    printf("Q. TEST SBESP RX   - Monitor Salt-Brine ESP32 RX (press ESC)\r\n");
-    printf("A. TEST AGITATOR   - Brine agitator ON/OFF control\r\n");
-    printf("W. TEST THROWER    - Salt thrower ON/OFF control\r\n");
-    printf("P. TEST PROXIMITY - Ultrasonic sensors left/right (press ESC)\r\n");
-    printf("M. TEST SABERTOOTH MONITOR - Live feedback polling (press ESC)\r\n" ANSI_RESET);
-    printf("Or type the full command (e.g. TEST MOTOR 1 25)\r\n");
-    printf(ANSI_CYAN "Type HELP (or ?) for command parameters\r\n" ANSI_RESET);
-    printf(ANSI_CYAN "Press ESC during tests to return to menu\r\n" ANSI_RESET);
-    printf(ANSI_RED "Type EXIT to resume normal operation\r\n" ANSI_RESET);
-    printf(ANSI_YELLOW "======================================" ANSI_RESET "\r\n");
+    printf(ANSI_BOLD ANSI_YELLOW "========== QUICK TEST MENU ==========" ANSI_RESET "\r\n");
+    printf(ANSI_BOLD ANSI_MAGENTA "\r\n[Core Diagnostics]\r\n" ANSI_RESET);
+    printf("  1. TEST ALL          - Run all diagnostics\r\n");
+    printf("  4. TEST GPS          - GPS position + quality\r\n");
+    printf("  5. TEST IMU          - Accel/Gyro/Magnetometer\r\n");
+    printf("  6. TEST TEMP         - Temperature sensor\r\n");
+    printf("  9. TEST STATE        - Show current state\r\n");
+    printf("  I. TEST I2C          - Scan I2C bus\r\n");
+    printf("  D. TEST IMUDETAIL    - Detailed IMU check\r\n");
+    printf("  P. TEST PROXIMITY    - Ultrasonic sensors left/right (press ESC)\r\n");
+
+    printf(ANSI_BOLD ANSI_CYAN "\r\n[Sabertooth Drive]\r\n" ANSI_RESET);
+    printf("  2. TEST MOTOR 1 30   - Motor 1 forward (percent)\r\n");
+    printf("  3. TEST MOTOR 2 30   - Motor 2 forward (percent)\r\n");
+    printf("  0. TEST MOTORSWEEP   - Sweep motor speeds (percent)\r\n");
+    printf("  C. TEST RAWCMD ...   - Send raw Sabertooth command\r\n");
+    printf("  F. TEST FORWARD      - Both motors full speed forward\r\n");
+    printf("  B. TEST REVERSE      - Both motors full speed reverse\r\n");
+    printf("  V. TEST LEFTTURN     - Left turn (M1 fwd, M2 rev)\r\n");
+    printf("  N. TEST RIGHTTURN    - Right turn (M1 rev, M2 fwd)\r\n");
+    printf("  K. TEST FEEDBACK ... - Monitor motor feedback\r\n");
+    printf("  Y. TEST TANKFORWARD  - Tank drive forward\r\n");
+    printf("  Z. TEST TANKREVERSE  - Tank drive reverse\r\n");
+    printf("  G. TEST TANKLEFT     - Tank drive forward + left\r\n");
+    printf("  H. TEST TANKRIGHT    - Tank drive forward + right\r\n");
+    printf("  M. TEST SABERTOOTH MONITOR - Live feedback polling\r\n");
+
+    printf(ANSI_BOLD ANSI_GREEN "\r\n[Salt / Brine ESP]\r\n" ANSI_RESET);
+    printf("  7. TEST SALT 50      - Salt pump 50%%\r\n");
+    printf("  8. TEST BRINE 50     - Brine pump 50%%\r\n");
+    printf("  A. TEST AGITATOR     - Brine agitator ON/OFF control\r\n");
+    printf("  W. TEST THROWER      - Salt thrower ON/OFF control\r\n");
+    printf("  O. TEST RELAY        - Sabertooth relay ON/OFF control\r\n");
+    printf("  E. TEST SBESP SEND   - Send Salt-Brine ESP32 string\r\n");
+    printf("  Q. TEST SBESP RX     - Monitor Salt-Brine ESP32 RX\r\n");
+    printf("  TEST CONTROL         - Mixed motor + SB-ESP control shell\r\n");
+
+    printf(ANSI_BOLD ANSI_BLUE "\r\n[LoRa / Links]\r\n" ANSI_RESET);
+    printf("  L. TEST LORA SEND    - Type and send raw LoRa string\r\n");
+    printf("  R. TEST LORA RX      - Monitor incoming LoRa messages\r\n");
+    printf("  X. TEST LORACMDS     - Send example LoRa control set\r\n");
+
+    printf(ANSI_BOLD ANSI_YELLOW "\r\n[System]\r\n" ANSI_RESET);
+    printf("  T. Show this test menu\r\n");
+    printf("  CTRL or TC           - Enter mixed control shell\r\n");
+    printf("  S. TEST HEALTH       - Show system health snapshot\r\n");
+    printf("  Type full commands too (example: TEST MOTOR 1 25)\r\n");
+    printf("  Multi-command demo: M1 30; AGITATOR ON; RELAY ON\r\n");
+    printf(ANSI_CYAN "  HELP or ?            - Show command parameters\r\n" ANSI_RESET);
+    printf(ANSI_CYAN "  ESC                  - Return from live tests / prompts\r\n" ANSI_RESET);
+    printf(ANSI_RED  "  EXIT                 - Resume normal operation\r\n" ANSI_RESET);
+    printf(ANSI_YELLOW "\r\n======================================" ANSI_RESET "\r\n");
 }
 
 void Console_SetTestModeFlag(volatile uint8_t *flag)
@@ -416,6 +874,7 @@ uint8_t Console_CheckEscPressed(void)
 {
     if (s_esc_pressed) {
         s_esc_pressed = 0;
+        Console_ForceAllOutputsOff("ESC");
         return 1;
     }
     return 0;
@@ -427,6 +886,7 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm)
     // ESC key (0x1B) - exit continuous tests
     if (byte == 0x1B) {
         s_esc_pressed = 1;
+        Console_ForceAllOutputsOff("ESC");
         printf("\r\n[ESC pressed]\r\n");
         return;
     }
@@ -460,19 +920,29 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 {
     if (!cmd || !sm) return;
 
-    // Optional: ignore empty lines / whitespace-only
-    if (cmd[0] == '\0') return;
+    char cmd_clean[256] = {0};
+    Console_NormalizeCommandText(cmd, cmd_clean, sizeof(cmd_clean), 0);
+
+    if (cmd_clean[0] == '\0') return;
+
+    if (Console_TryProcessCommandSequence(cmd_clean, sm)) {
+        return;
+    }
 
     char cmd_upper[256];
-    size_t cmd_len = strnlen(cmd, sizeof(cmd_upper) - 1);
-    for (size_t i = 0; i < cmd_len; i++) {
-        cmd_upper[i] = (char)toupper((unsigned char)cmd[i]);
+    Console_NormalizeCommandText(cmd_clean, cmd_upper, sizeof(cmd_upper), 1);
+
+    if (strcmp(cmd_upper, "ALLON") == 0 || strcmp(cmd_upper, "FULLON") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Console_ApplyFullActivationPreset();
+        return;
     }
-    cmd_upper[cmd_len] = '\0';
 
     // ========== EXIT TEST MODE ==========
     if (strcmp(cmd_upper, "EXIT") == 0)
     {
+        Console_ForceAllOutputsOff("EXIT");
         if (s_test_mode_flag) {
             extern UART_HandleTypeDef huart2;
             *s_test_mode_flag = 0;
@@ -499,13 +969,28 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
+    if (strcmp(cmd_upper, "ESC") == 0) {
+        Console_ForceAllOutputsOff("typed ESC");
+        Console_ShowTestMenu();
+        return;
+    }
+
     // ========== QUICK TEST MENU ==========
     if (strcmp(cmd_upper, "T") == 0)
     {
         if (s_test_mode_flag) {
             *s_test_mode_flag = 1;
         }
+        Dispersion_BypassStartupCheck();
+        printf("[DISP] Startup check bypassed via test menu entry\r\n");
         Console_ShowTestMenu();
+        return;
+    }
+
+    if (strcmp(cmd_upper, "CTRL") == 0 || strcmp(cmd_upper, "TC") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        Console_RunMixedControlShell(sm);
         return;
     }
 
@@ -569,7 +1054,10 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             Console_WatchdogKick();
             if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                 uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-                if (ch == 0x1B) break;
+                if (ch == 0x1B) {
+                    Console_ForceAllOutputsOff("ESC");
+                    break;
+                }
             }
             if (Console_CheckEscPressed()) break;
             IMU_Status_t imu = IMU_Read();
@@ -727,7 +1215,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
-    if (strcmp(cmd_upper, "H") == 0)
+    if (strcmp(cmd_upper, "S") == 0)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
         Diag_SystemHealth();
@@ -735,7 +1223,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
-    if (strcmp(cmd_upper, "L") == 0)
+    if (strcmp(cmd_upper, "L") == 0 || strcmp(cmd_upper, "J") == 0)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
         printf(ANSI_CYAN "\r\n[DIAG] ===== LoRa SEND MENU =====\r\n" ANSI_RESET);
@@ -764,7 +1252,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
-    if (strcmp(cmd_upper, "R") == 0)
+    if (strcmp(cmd_upper, "R") == 0 || strcmp(cmd_upper, "U") == 0)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
         extern UART_HandleTypeDef huart2;
@@ -819,6 +1307,11 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         printf(ANSI_CYAN "\r\n[DIAG] ===== SB-ESP SEND MENU =====\r\n" ANSI_RESET);
         printf("[DIAG] Type text and press ENTER to send over UART4\r\n");
         printf("[DIAG] Press ESC to exit this send menu\r\n");
+        Dispersion_SetRateDirect(0, 0);
+        Dispersion_SendRaw("AGITATOR OFF");
+        Dispersion_SendRaw("THROWER OFF");
+        Dispersion_SendRaw("RELAY ON");
+        printf("[DIAG] SB-ESP send menu armed: SALT=0%% BRINE=0%% AGITATOR=OFF THROWER=OFF RELAY=ON\r\n");
         printf("[DIAG] Example: PING or SALT:25,BRINE:75\r\n\r\n");
         while (1) {
             char sb_text[160] = {0};
@@ -856,6 +1349,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
                     if (ch == 0x1B) {
+                        Console_ForceAllOutputsOff("ESC");
                         printf("\r\n[DIAG] Polling stopped\r\n");
                         break;
                     }
@@ -900,7 +1394,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 
         if (should_send_zero_on_exit) {
             Dispersion_SetRateDirect(0, 0);
-            printf("[DIAG] SB-ESP OFF command sent on menu exit: SALT=0%% BRINE=0%%\r\n");
+              Dispersion_SendRaw("RELAY OFF");
+              printf("[DIAG] SB-ESP safe-state sent on menu exit: SALT=0%% BRINE=0%% RELAY=OFF\r\n");
         }
 
         Dispersion_SetTestResponseMode(0);
@@ -921,7 +1416,10 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             Console_WatchdogKick();
             if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                 uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-                if (ch == 0x1B) break;
+                if (ch == 0x1B) {
+                    Console_ForceAllOutputsOff("ESC");
+                    break;
+                }
             }
             if (Console_CheckEscPressed()) break;
 
@@ -1022,6 +1520,38 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
+    if (strcmp(cmd_upper, "O") == 0)
+    {
+        if (s_test_mode_flag) *s_test_mode_flag = 1;
+        printf(ANSI_CYAN "\r\n[DIAG] ===== SABERTOOTH RELAY TEST =====\r\n" ANSI_RESET);
+        printf("[DIAG] Type ON or OFF and press ENTER (ESC to exit)\r\n\r\n");
+        while (1) {
+            char relay_input[16] = {0};
+            if (!Console_ReadLineBlocking("[DIAG] Relay ON or OFF: ", relay_input, sizeof(relay_input))) {
+                break;
+            }
+            for (int i = 0; relay_input[i]; i++) relay_input[i] = (char)toupper((unsigned char)relay_input[i]);
+            if (strcmp(relay_input, "ON") == 0 || strcmp(relay_input, "OFF") == 0) {
+                char relay_cmd[24];
+                snprintf(relay_cmd, sizeof(relay_cmd), "RELAY %s", relay_input);
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(relay_cmd);
+                HAL_Delay(400);
+                const char *resp = Dispersion_GetLastStatus();
+                if (resp && resp[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", resp);
+                } else {
+                    printf("[DIAG] No response from SB-ESP\r\n");
+                }
+            } else if (relay_input[0] != '\0') {
+                printf("[DIAG] Invalid input - type ON or OFF\r\n");
+            }
+        }
+        Dispersion_SetTestResponseMode(0);
+        Console_ShowTestMenu();
+        return;
+    }
+
     // ========== HELP COMMAND ==========
     if (strcmp(cmd_upper, "HELP") == 0 || strcmp(cmd_upper, "?") == 0)
     {
@@ -1041,6 +1571,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         printf("  TEST BRINESWEEP [delay]         - Sweep brine pump, delay in ms (default 100)\r\n");
         printf("  TEST AGITATOR <ON/OFF>          - Brine agitator direct control\r\n");
         printf("  TEST THROWER  <ON/OFF>          - Salt thrower direct control\r\n");
+        printf("  TEST RELAY    <ON/OFF>          - Sabertooth relay direct control\r\n");
+        printf("  TEST CONTROL                    - Open mixed motor + SB-ESP shell\r\n");
         printf("  TEST SBESP <text>               - Send raw Salt-Brine ESP32 string\r\n");
         printf("  TEST SBESPRX                    - Monitor Salt-Brine ESP32 messages\r\n");
         printf("  TEST LORA <text>                - Send raw LoRa string to ESP32\r\n");
@@ -1057,8 +1589,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     // Allow direct commands like "M1: 500" or "M2: -1000" without TEST prefix
     if ((strncmp(cmd_upper, "M1:", 3) == 0) || (strncmp(cmd_upper, "M2:", 3) == 0))
     {
-        printf(ANSI_CYAN "[DIRECT] Sending to Sabertooth: %s\r\n" ANSI_RESET, cmd);
-        Sabertooth_SendRawCommand(cmd);
+        printf(ANSI_CYAN "[DIRECT] Sending to Sabertooth: %s\r\n" ANSI_RESET, cmd_clean);
+        Sabertooth_SendRawCommand(cmd_clean);
         return;
     }
 
@@ -1069,12 +1601,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             *s_test_mode_flag = 1;
         }
         // Parse TEST subcommand: TEST <COMPONENT> [ARGS]
-        const char *subcmd_up = cmd_upper + 4;
-        const char *subcmd_orig = cmd + 4;
-        while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-            subcmd_up++;
-            subcmd_orig++;
-        }
+        const char *subcmd_up = Console_SkipCommandDelims(cmd_upper + 4);
+        const char *subcmd_orig = Console_SkipCommandDelims(cmd_clean + 4);
 
         // TEST MOTORSWEEP <delay_ms> (also accept "TEST MOTOR SWEEP")
         {
@@ -1098,10 +1626,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             }
 
             if (sweep_orig) {
-                while (*sweep_up == ' ' && *sweep_orig == ' ') {
-                    sweep_up++;
-                    sweep_orig++;
-                }
+                sweep_up = Console_SkipCommandDelims(sweep_up);
+                sweep_orig = Console_SkipCommandDelims(sweep_orig);
 
                 uint16_t delay_ms = 100; // Default 100ms
                 sscanf(sweep_orig, "%hu", &delay_ms);
@@ -1116,10 +1642,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         {
             subcmd_up += 5;
             subcmd_orig += 5;
-            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-                subcmd_up++;
-                subcmd_orig++;
-            }
+            subcmd_up = Console_SkipCommandDelims(subcmd_up);
+            subcmd_orig = Console_SkipCommandDelims(subcmd_orig);
 
             int motor = 0;
             int speed = 0;
@@ -1158,10 +1682,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         if (strncmp(subcmd_up, "FEEDBACK", 8) == 0) {
             subcmd_up += 8;
             subcmd_orig += 8;
-            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-                subcmd_up++;
-                subcmd_orig++;
-            }
+            subcmd_up = Console_SkipCommandDelims(subcmd_up);
+            subcmd_orig = Console_SkipCommandDelims(subcmd_orig);
             uint16_t duration = 5000;  // Default 5 seconds
             sscanf(subcmd_orig, "%hu", &duration);
             Diag_TestMotorFeedback(duration);
@@ -1202,10 +1724,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 subcmd_up += 5;
                 subcmd_orig += 5;
             }
-            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-                subcmd_up++;
-                subcmd_orig++;
-            }
+            subcmd_up = Console_SkipCommandDelims(subcmd_up);
+            subcmd_orig = Console_SkipCommandDelims(subcmd_orig);
 
             if (*subcmd_orig == '\0') {
                 printf("[DIAG] Usage: TEST RAWCMD <text>\r\n");
@@ -1221,10 +1741,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         {
             subcmd_up += 4;
             subcmd_orig += 4;
-            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-                subcmd_up++;
-                subcmd_orig++;
-            }
+            subcmd_up = Console_SkipCommandDelims(subcmd_up);
+            subcmd_orig = Console_SkipCommandDelims(subcmd_orig);
 
             uint8_t rate = 0;
             sscanf(subcmd_orig, "%hhu", &rate);
@@ -1238,10 +1756,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         {
             subcmd_up += 9;
             subcmd_orig += 9;
-            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-                subcmd_up++;
-                subcmd_orig++;
-            }
+            subcmd_up = Console_SkipCommandDelims(subcmd_up);
+            subcmd_orig = Console_SkipCommandDelims(subcmd_orig);
 
             uint16_t delay_ms = 100; // Default 100ms
             sscanf(subcmd_orig, "%hu", &delay_ms);
@@ -1287,8 +1803,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         // TEST AGITATOR ON/OFF
         if (strncmp(subcmd_up, "AGITATOR", 8) == 0)
         {
-            const char *ag_arg = subcmd_up + 8;
-            while (*ag_arg == ' ') ag_arg++;
+            const char *ag_arg = Console_SkipCommandDelims(subcmd_up + 8);
             if (strcmp(ag_arg, "ON") == 0 || strcmp(ag_arg, "OFF") == 0) {
                 char ag_cmd[24];
                 snprintf(ag_cmd, sizeof(ag_cmd), "AGITATOR %s", ag_arg);
@@ -1309,8 +1824,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         // TEST THROWER ON/OFF
         if (strncmp(subcmd_up, "THROWER", 7) == 0)
         {
-            const char *th_arg = subcmd_up + 7;
-            while (*th_arg == ' ') th_arg++;
+            const char *th_arg = Console_SkipCommandDelims(subcmd_up + 7);
             if (strcmp(th_arg, "ON") == 0 || strcmp(th_arg, "OFF") == 0) {
                 char th_cmd[24];
                 snprintf(th_cmd, sizeof(th_cmd), "THROWER %s", th_arg);
@@ -1325,6 +1839,34 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             } else {
                 printf("[DIAG] Usage: TEST THROWER ON  or  TEST THROWER OFF\r\n");
             }
+            return;
+        }
+
+        // TEST RELAY ON/OFF
+        if (strncmp(subcmd_up, "RELAY", 5) == 0)
+        {
+            const char *relay_arg = Console_SkipCommandDelims(subcmd_up + 5);
+            if (strcmp(relay_arg, "ON") == 0 || strcmp(relay_arg, "OFF") == 0) {
+                char relay_cmd[24];
+                snprintf(relay_cmd, sizeof(relay_cmd), "RELAY %s", relay_arg);
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(relay_cmd);
+                HAL_Delay(400);
+                const char *resp = Dispersion_GetLastStatus();
+                if (resp && resp[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", resp);
+                }
+                Dispersion_SetTestResponseMode(0);
+            } else {
+                printf("[DIAG] Usage: TEST RELAY ON  or  TEST RELAY OFF\r\n");
+            }
+            return;
+        }
+
+        // TEST CONTROL
+        if (strcmp(subcmd_up, "CONTROL") == 0)
+        {
+            Console_RunMixedControlShell(sm);
             return;
         }
 
@@ -1345,10 +1887,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 subcmd_up += 4;
                 subcmd_orig += 4;
             }
-            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-                subcmd_up++;
-                subcmd_orig++;
-            }
+            subcmd_up = Console_SkipCommandDelims(subcmd_up);
+            subcmd_orig = Console_SkipCommandDelims(subcmd_orig);
 
             if (*subcmd_orig == '\0') {
                 printf("[DIAG] Usage: TEST SBESP <text>\r\n");
@@ -1397,7 +1937,10 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 Console_WatchdogKick();
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-                    if (ch == 0x1B) break;
+                    if (ch == 0x1B) {
+                        Console_ForceAllOutputsOff("ESC");
+                        break;
+                    }
                 }
                 if (Console_CheckEscPressed()) break;
 
@@ -1446,10 +1989,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         {
             subcmd_up += 4;
             subcmd_orig += 4;
-            while (*subcmd_up == ' ' && *subcmd_orig == ' ') {
-                subcmd_up++;
-                subcmd_orig++;
-            }
+            subcmd_up = Console_SkipCommandDelims(subcmd_up);
+            subcmd_orig = Console_SkipCommandDelims(subcmd_orig);
 
             if (*subcmd_orig == '\0') {
                 printf("[DIAG] Usage: TEST LORA <text>\r\n");
@@ -1478,7 +2019,10 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 Console_WatchdogKick();
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-                    if (ch == 0x1B) break;
+                    if (ch == 0x1B) {
+                        Console_ForceAllOutputsOff("ESC");
+                        break;
+                    }
                 }
                 if (Console_CheckEscPressed()) break;
 
@@ -1539,6 +2083,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
                     if (ch == 0x1B) {
+                        Console_ForceAllOutputsOff("ESC");
                         break;
                     }
                 }
@@ -1588,10 +2133,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         {
             const char *extra_up = subcmd_up + 10;
             const char *extra_orig = subcmd_orig + 10;
-            while (*extra_up == ' ' && *extra_orig == ' ') {
-                extra_up++;
-                extra_orig++;
-            }
+            extra_up = Console_SkipCommandDelims(extra_up);
+            extra_orig = Console_SkipCommandDelims(extra_orig);
             if (strcmp(extra_up, "MONITOR") == 0)
             {
                 Diag_MonitorSabertoothFeedback();
@@ -1633,12 +2176,12 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     }
 
     // ========== CONTROL COMMANDS ==========
-    if (strcmp(cmd, "ESTOP") == 0) {
+    if (strcmp(cmd_upper, "ESTOP") == 0) {
         RobotSM_Request(sm, STATE_ESTOP);
         return;
     }
 
-    if (strcmp(cmd, "RESET") == 0) {
+    if (strcmp(cmd_upper, "RESET") == 0) {
         RobotState_t cur = RobotSM_Current(sm);
         if (cur == STATE_ESTOP || cur == STATE_ERROR) {
             RobotSM_Request(sm, STATE_PAUSE);
@@ -1646,24 +2189,24 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
-    if (strcmp(cmd, "PAUSE") == 0) {
+    if (strcmp(cmd_upper, "PAUSE") == 0) {
         RobotSM_Request(sm, STATE_PAUSE);
         return;
     }
 
-    if (strcmp(cmd, "AUTO") == 0) {
+    if (strcmp(cmd_upper, "AUTO") == 0) {
         RobotSM_Request(sm, STATE_AUTO);
         return;
     }
 
-    if (strcmp(cmd, "MANUAL") == 0) {
+    if (strcmp(cmd_upper, "MANUAL") == 0) {
         RobotSM_Request(sm, STATE_MANUAL);
         return;
     }
 
     // Only parse speed commands in MANUAL
     if (RobotSM_Current(sm) == STATE_MANUAL) {
-        ParseManualSpeedCommand(cmd);
+        ParseManualSpeedCommand(cmd_clean);
         return;
     }
 
