@@ -51,6 +51,9 @@
 #define RAD2DEG (57.2957795130823f)
 #define PI_F      3.14159265f
 #define TWO_PI_F  (2.0f * PI_F)
+#define LORA_LINK_FAILSAFE_TIMEOUT_MS 10000u
+#define LORA_LINK_FAILSAFE_COOLDOWN_MS 3000u
+#define LORA_LINK_FAILSAFE_USE_ESTOP 1u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -119,6 +122,7 @@ static uint8_t s_disp_uart4_rx_byte = 0;
 static uint8_t s_lora_uart5_rx_byte = 0;
 static uint16_t s_console_line_len = 0;
 static uint8_t s_startup_bypass_candidate = 0;
+static uint32_t s_lora_link_failsafe_last_ms = 0;
 
 static uint8_t Console_HandleStartupBypassKey(uint8_t ch)
 {
@@ -233,6 +237,43 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
 
   printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
   printf("[LoRa] manual cmd: %s -> M1=%d M2=%d\r\n", cmd_name, m1_speed, m2_speed);
+}
+
+static void EnforceLoRaLinkFailsafeIfNeeded(uint32_t now_ms)
+{
+  RobotState_t current_state = RobotSM_Current(&g_sm);
+  if (current_state != STATE_AUTO) {
+    return;
+  }
+
+  uint32_t last_rx_ms = LoRA_GetLastRxMs();
+  if (last_rx_ms == 0u) {
+    return;
+  }
+
+  if ((now_ms - last_rx_ms) <= LORA_LINK_FAILSAFE_TIMEOUT_MS) {
+    return;
+  }
+
+  if ((now_ms - s_lora_link_failsafe_last_ms) < LORA_LINK_FAILSAFE_COOLDOWN_MS) {
+    return;
+  }
+
+  s_lora_link_failsafe_last_ms = now_ms;
+
+  Console_SendSafeState();
+
+#if LORA_LINK_FAILSAFE_USE_ESTOP
+  RobotSM_Request(&g_sm, STATE_ESTOP);
+  LoRA_SendFault(255, 1);
+  printf("[P0 FAILSAFE] LoRa link stale in AUTO (%lums) -> ESTOP + safe outputs\r\n",
+         (unsigned long)(now_ms - last_rx_ms));
+#else
+  RobotSM_Request(&g_sm, STATE_PAUSE);
+  LoRA_SendFault(255, 0);
+  printf("[P0 FAILSAFE] LoRa link stale in AUTO (%lums) -> PAUSE + safe outputs\r\n",
+         (unsigned long)(now_ms - last_rx_ms));
+#endif
 }
 
 static uint8_t ParseLoRaJsonCmdInMain(const char *frame,
@@ -713,6 +754,7 @@ int main(void)
 
           // Update LoRA periodic tasks (timeout checking, etc.)
           LoRA_Tick(now_ms);
+          EnforceLoRaLinkFailsafeIfNeeded(now_ms);
 
             // ---- 1 Hz status/readout prints (SKIP during test mode) ----
             if ((now_ms - last_1hz_ms) >= 1000 && !g_test_mode)
