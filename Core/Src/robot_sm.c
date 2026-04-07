@@ -1,5 +1,6 @@
 #include "robot_sm.h"
 #include "robot_actions.h"
+#include "mission.h"
 #include "stdio.h"
 
 // Convert fault code to human-readable string for logging
@@ -34,6 +35,15 @@ static const char* StateToString(RobotState_t state)
     }
 }
 
+static void PersistMissionState(const RobotSM_t *sm)
+{
+    if (!sm || !sm->mission.waypoints || sm->mission.total_waypoints == 0) {
+        return;
+    }
+
+    (void)Mission_PersistCurrent(sm->mission.current_index, sm->mission.mission_active ? 1u : 0u);
+}
+
 // Called when entering a new state; enforces safe motor behavior by state
 void RobotSM_OnEnter(RobotState_t s, RobotSM_t *sm)
 {
@@ -44,40 +54,63 @@ void RobotSM_OnEnter(RobotState_t s, RobotSM_t *sm)
         case STATE_ESTOP:
             // Emergency stop: immediate motor shutdown, latched
             Stop_Motors();
-            if (sm) sm->estop_latched = true;
+            if (sm) {
+                sm->estop_latched = true;
+                if (sm->mission.waypoints && sm->mission.total_waypoints > 0) {
+                    sm->mission.mission_active = false;
+                    PersistMissionState(sm);
+                }
+            }
             printf("[SM] ESTOP LATCHED - manual reset required\r\n");
             break;
 
         case STATE_ERROR:
             // Error state: stop motors, preserve fault code for diagnostics
             Stop_Motors();
-            if (sm)
+            if (sm) {
+                if (sm->mission.waypoints && sm->mission.total_waypoints > 0) {
+                    sm->mission.mission_active = false;
+                    PersistMissionState(sm);
+                }
                 printf("[SM] Error state: fault=%s\r\n", FaultCodeToString(sm->fault_code));
+            }
             break;
 
         case STATE_PAUSE:
             // Safe idle: stop motors, wait for next command
             Stop_Motors();
+            if (sm && sm->mission.waypoints && sm->mission.total_waypoints > 0) {
+                sm->mission.mission_active = false;
+                PersistMissionState(sm);
+            }
             printf("[SM] Safe idle, ready for next command\r\n");
             break;
 
         case STATE_MANUAL:
             // Manual control: motors disabled until operator sends commands
             Stop_Motors();
+            if (sm && sm->mission.waypoints && sm->mission.total_waypoints > 0) {
+                sm->mission.mission_active = false;
+                PersistMissionState(sm);
+            }
             printf("[SM] Manual control enabled - waiting for RC input\r\n");
             break;
 
         case STATE_AUTO:
-            // Autonomous mode: prepare mission, reset waypoint index
+            // Autonomous mode: prepare mission and preserve restored waypoint progress.
             Stop_Motors();
             if (sm)
             {
                 if (sm->mission.waypoints && sm->mission.total_waypoints > 0)
                 {
-                    sm->mission.current_index = 0;
+                    if (sm->mission.current_index >= sm->mission.total_waypoints) {
+                        sm->mission.current_index = 0;
+                    }
                     sm->mission.mission_active = true;
                     sm->mission.start_time_ms = 0; // Populated by AutonomousControl_Task
-                    printf("[SM] Autonomous mission loaded: %d waypoints\r\n",
+                    PersistMissionState(sm);
+                    printf("[SM] Autonomous mission ready: waypoint %d/%d\r\n",
+                           (int)sm->mission.current_index + 1,
                            (int)sm->mission.total_waypoints);
                 }
                 else
@@ -181,6 +214,7 @@ void RobotSM_LoadMission(RobotSM_t *sm, Waypoint_t *waypoints, uint16_t count)
     sm->mission.current_index = 0;
     sm->mission.mission_active = false;
 
+    PersistMissionState(sm);
     printf("[SM] Mission loaded: %d waypoints\r\n", (int)count);
 }
 
@@ -191,6 +225,7 @@ void RobotSM_ResetMission(RobotSM_t *sm)
 
     sm->mission.current_index = 0;
     sm->mission.mission_active = false;
+    PersistMissionState(sm);
     printf("[SM] Mission reset to waypoint 0\r\n");
 }
 
@@ -204,6 +239,7 @@ bool RobotSM_AdvanceWaypoint(RobotSM_t *sm)
 
     if (has_more)
     {
+        PersistMissionState(sm);
         printf("[SM] Advanced to waypoint %d/%d\r\n",
                (int)sm->mission.current_index + 1,
                (int)sm->mission.total_waypoints);
@@ -212,6 +248,7 @@ bool RobotSM_AdvanceWaypoint(RobotSM_t *sm)
     {
         printf("[SM] Mission complete - all waypoints reached\r\n");
         sm->mission.mission_active = false;
+        Mission_ClearPersisted();
     }
 
     return has_more;

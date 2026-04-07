@@ -511,6 +511,19 @@ int main(void)
   printf("[UART MAP] SB-ESP: UART4 TX=PC10 RX=PC11 @9600\r\n");
   printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @115200\r\n");
   Mission_Init();    // Initialize mission management module
+  MissionRestoreInfo_t restored_mission = {0};
+  if (Mission_RestoreInfo(&restored_mission)) {
+      RobotSM_LoadMission(&g_sm, Mission_GetWaypoints(), restored_mission.waypoint_count);
+      if (restored_mission.current_index < g_sm.mission.total_waypoints) {
+          g_sm.mission.current_index = restored_mission.current_index;
+      }
+      g_sm.mission.mission_active = restored_mission.mission_active ? true : false;
+      (void)Mission_PersistCurrent(g_sm.mission.current_index, g_sm.mission.mission_active ? 1u : 0u);
+      printf("[MISSION] Boot restore ready: %u waypoints, index %u, active=%u\r\n",
+             restored_mission.waypoint_count,
+             restored_mission.current_index,
+             restored_mission.mission_active);
+  }
   HAL_Delay(200);   // Allow SB-ESP time to be ready before issuing safe-state commands
   Console_SendSafeState(); // Zero all TC-controllable outputs on startup
   HAL_Delay(100);

@@ -67,13 +67,13 @@ void Dispersion_BypassStartupCheck(void)
     }
 }
 
-// Initialize dispersion system
-// - PWM outputs: salt auger (motor 3) and brine pump (motor 4)
-// - UART4 link to dispersion ESP32 for telemetry and control
+// Initialize dispersion passthrough link
+// - STM32 uses UART4 to command the dedicated dispersion ESP32
+// - The ESP32 owns external outputs, startup gating, and feedback telemetry
 void Dispersion_Init(UART_HandleTypeDef *huart4)
 {
-    // TODO: Configure PWM outputs for salt auger and brine pump
-    // TODO: Initialize ADC/GPIO for flow sensor inputs (salt on ADC, brine on ADC)
+    // Hardware ownership note: the dedicated ESP32 handles external outputs and
+    // local feedback processing, so the STM32 only maintains the UART control link.
     
     disp_state.huart = huart4;
     disp_state.initialized = 1;
@@ -129,10 +129,10 @@ void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate)
         }
     }
 
-    // TODO: Send PWM commands to salt auger and brine pump
-    // PWM format: scale percent to motor speed range (0-255 or similar)
-    // salt_pwm = (salt_rate * 255) / 100;
-    // brine_pwm = (brine_rate * 255) / 100;
+    // The dedicated ESP32 applies the actual salt/brine output logic once it receives
+    // the UART command, so there is no local PWM command path on the STM32.
+
+
 
     // Log change
     printf("[DISP] Dispersion rates: salt=%d%%, brine=%d%%\r\n",
@@ -228,13 +228,13 @@ void Dispersion_SendRaw(const char *text)
     }
 }
 
-// Read salt auger flow from sensor (mL/min)
-// Returns: Flow rate in mL/min, 0 if sensor error
+// Read latest salt flow estimate relayed by the dispersion ESP32 (mL/min)
+// Returns: Flow rate in mL/min, 0 if no feedback has been received yet
 uint16_t Dispersion_ReadSaltFlow(void)
 {
-    // TODO: Read ADC from salt flow sensor
-    // Convert ADC to mL/min (depends on sensor specs)
-    // Typical: 0V=0mL/min, 5V=max_flow
+    // The STM32 relies on the latest flow value reported by the dispersion ESP32.
+
+    // Return last cached value
     
     // Placeholder: Return last cached value
     return disp_state.salt_flow_mlmin;
@@ -443,3 +443,4 @@ uint8_t Dispersion_GetBrineRate(void)
 {
     return disp_state.brine_rate_percent;
 }
+

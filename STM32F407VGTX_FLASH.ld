@@ -47,8 +47,10 @@ MEMORY
 {
   CCMRAM    (xrw)    : ORIGIN = 0x10000000,   LENGTH = 64K
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 128K
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 1024K
+  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 896K
 }
+
+/* Reserve the final 128 KB flash sector (0x080E0000-0x080FFFFF) for mission checkpoints. */
 
 /* Sections */
 SECTIONS
@@ -207,3 +209,6 @@ SECTIONS
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
 }
+
+
+

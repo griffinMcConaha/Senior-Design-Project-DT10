@@ -160,6 +160,14 @@ static int PID_HeadingControl(float heading_error_deg)
     return (int)base_speed_diff;
 }
 
+#define AUTO_AVOID_APPROACH_MS 500u
+#define AUTO_AVOID_BYPASS_MS   1200u
+#define AUTO_AVOID_REJOIN_MS   700u
+#define AUTO_AVOID_PINCH_MS    1500u
+#define AUTO_AVOID_SIDE_NONE   0
+#define AUTO_AVOID_SIDE_LEFT  -1
+#define AUTO_AVOID_SIDE_RIGHT  1
+
 // Autonomous control mode: GPS path following with heading correction
 void AutonomousControl_Task(void)
 {
@@ -281,43 +289,129 @@ void AutonomousControl_Task(void)
     // Proximity sensor monitoring (obstacle avoidance)
     uint16_t prox_left = Proximity_ReadLeft();
     uint16_t prox_right = Proximity_ReadRight();
-
     // Check for obstacles
     uint8_t status_left = Proximity_GetStatus(prox_left);
     uint8_t status_right = Proximity_GetStatus(prox_right);
 
+    uint32_t now = HAL_GetTick();
+
     if (status_left >= 2 || status_right >= 2)
     {
-        // Critical distance - emergency stop
+        // Critical distance - emergency stop.
         printf("[AUTO] OBSTACLE: Critical distance detected (%u cm, %u cm)\r\n",
                prox_left, prox_right);
         Stop_Motors();
+        avoid_phase = 0;
+        avoid_side = AUTO_AVOID_SIDE_NONE;
+        avoid_pinch_started_ms = 0;
         RobotSM_SetFault(&g_sm, FAULT_PROXIMITY_CRIT);
         return;
     }
 
     if (status_left >= 1 || status_right >= 1)
     {
-        // Warning distance - slow down
-        int reduced_speed = base_speed / 2; // 50% speed
-        int reduced_diff = speed_diff / 2;
+        if (status_left >= 1 && status_right >= 1)
+        {
+            // Both sides are constrained: creep briefly, then stop and fault if the path stays pinched.
+            int creep_speed = base_speed / 3;
+            Sabertooth_SetM1(creep_speed);
+            Sabertooth_SetM2(creep_speed);
+            avoid_side = AUTO_AVOID_SIDE_NONE;
+            avoid_phase = 0;
+            if (avoid_pinch_started_ms == 0)
+            {
+                avoid_pinch_started_ms = now;
+            }
+            else if ((now - avoid_pinch_started_ms) >= AUTO_AVOID_PINCH_MS)
+            {
+                printf("[AUTO] OBSTACLE: Warning on both sides persisted (%u cm, %u cm)\r\n",
+                       prox_left, prox_right);
+                Stop_Motors();
+                avoid_phase = 0;
+                avoid_side = AUTO_AVOID_SIDE_NONE;
+                avoid_pinch_started_ms = 0;
+                RobotSM_SetFault(&g_sm, FAULT_PROXIMITY_CRIT);
+                return;
+            }
+        }
+        else
+        {
+            int8_t detected_side = status_left >= 1 ? AUTO_AVOID_SIDE_LEFT : AUTO_AVOID_SIDE_RIGHT;
+            if (avoid_side != detected_side)
+            {
+                avoid_side = detected_side;
+                avoid_phase = 1;
+                avoid_started_ms = now;
+                avoid_pinch_started_ms = 0;
+            }
 
-        m1_speed = reduced_speed - reduced_diff;
-        m2_speed = reduced_speed + reduced_diff;
+            int reduced_speed = base_speed / 2;
+            if (avoid_phase == 1)
+            {
+                // Phase 1: move forward briefly to get close enough to the obstacle edge before bypassing.
+                Sabertooth_SetM1(reduced_speed);
+                Sabertooth_SetM2(reduced_speed);
+                if ((now - avoid_started_ms) >= AUTO_AVOID_APPROACH_MS)
+                {
+                    avoid_phase = 2;
+                    avoid_started_ms = now;
+                }
+            }
+            else if (avoid_phase == 2)
+            {
+                // Phase 2: bias away from the blocked side to clear the obstacle edge.
+                int steer_inner = reduced_speed / 3;
+                int steer_outer = reduced_speed;
+                if (avoid_side == AUTO_AVOID_SIDE_LEFT)
+                {
+                    Sabertooth_SetM1(steer_inner);
+                    Sabertooth_SetM2(steer_outer);
+                }
+                else
+                {
+                    Sabertooth_SetM1(steer_outer);
+                    Sabertooth_SetM2(steer_inner);
+                }
 
-        // Clamp again
-        if (m1_speed > 100) m1_speed = 100;
-        if (m1_speed < 0) m1_speed = 0;
-        if (m2_speed > 100) m2_speed = 100;
-        if (m2_speed < 0) m2_speed = 0;
+                if ((now - avoid_started_ms) >= AUTO_AVOID_BYPASS_MS)
+                {
+                    avoid_phase = 3;
+                    avoid_started_ms = now;
+                }
+            }
+            else
+            {
+                // Phase 3: gently rejoin the planned line instead of snapping straight back to waypoint tracking.
+                int steer_inner = reduced_speed / 2;
+                int steer_outer = reduced_speed;
+                if (avoid_side == AUTO_AVOID_SIDE_LEFT)
+                {
+                    Sabertooth_SetM1(steer_outer);
+                    Sabertooth_SetM2(steer_inner);
+                }
+                else
+                {
+                    Sabertooth_SetM1(steer_inner);
+                    Sabertooth_SetM2(steer_outer);
+                }
 
-        Sabertooth_SetM1(m1_speed);
-        Sabertooth_SetM2(m2_speed);
+                if ((now - avoid_started_ms) >= AUTO_AVOID_REJOIN_MS)
+                {
+                    avoid_phase = 0;
+                    avoid_side = AUTO_AVOID_SIDE_NONE;
+                }
+            }
+        }
+    }
+    else
+    {
+        avoid_phase = 0;
+        avoid_side = AUTO_AVOID_SIDE_NONE;
+        avoid_pinch_started_ms = 0;
     }
 
     // Periodic status logging (1 Hz)
     static uint32_t last_log = 0;
-    uint32_t now = HAL_GetTick();
     if ((now - last_log) >= 1000)
     {
         last_log = now;
@@ -346,7 +440,6 @@ void Handle_Error(void)
 
     // Log periodically (1 Hz) to keep user informed of error state
     static uint32_t last_log = 0;
-    uint32_t now = HAL_GetTick();
 
     if ((now - last_log) >= 1000)
     {
@@ -388,3 +481,6 @@ void Emergency_Stop(void)
     // Note: ESTOP latch is managed by state machine (RobotSM_HandleTransitions)
     // Cannot exit this state without going through PAUSE first
 }
+
+
+

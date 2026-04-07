@@ -389,7 +389,8 @@ void LoRA_RxByte(uint8_t byte)
             {
                 memset(s_lora_wp_buf, 0, sizeof(s_lora_wp_buf));
                 s_lora_wp_count = 0;
-                Mission_Init();
+                Mission_ClearCurrent();
+                Mission_ClearPersisted();
                 LoRA_SendRaw(LORA_WP_ACK_CLEAR);
                 if (s_lora_verbose) {
                     printf("[LORA] Cleared staged waypoint set\r\n");
