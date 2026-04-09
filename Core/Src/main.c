@@ -51,9 +51,6 @@
 #define RAD2DEG (57.2957795130823f)
 #define PI_F      3.14159265f
 #define TWO_PI_F  (2.0f * PI_F)
-#define LORA_LINK_FAILSAFE_TIMEOUT_MS 10000u
-#define LORA_LINK_FAILSAFE_COOLDOWN_MS 3000u
-#define LORA_LINK_FAILSAFE_USE_ESTOP 1u
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -120,74 +117,6 @@ volatile uint32_t imu_last_update_ms = 0; // Last IMU read timestamp
 volatile uint8_t g_test_mode = 0;         // 1 = stay in test mode until reset
 static uint8_t s_disp_uart4_rx_byte = 0;
 static uint8_t s_lora_uart5_rx_byte = 0;
-static uint16_t s_console_line_len = 0;
-static uint8_t s_startup_bypass_candidate = 0;
-static uint32_t s_lora_link_failsafe_last_ms = 0;
-
-static uint8_t Console_HandleStartupBypassKey(uint8_t ch)
-{
-  if (ch == '\r' || ch == '\n') {
-    uint8_t should_bypass = (s_startup_bypass_candidate && s_console_line_len == 1u);
-    s_console_line_len = 0;
-    s_startup_bypass_candidate = 0;
-    if (should_bypass) {
-      Dispersion_BypassStartupCheck();
-      printf("[DISP] Startup check bypass requested by explicit console command 'S'\\r\\n");
-      return 1;
-    }
-    return 0;
-  }
-
-  if (s_console_line_len == 0u && (ch == 'S' || ch == 's')) {
-    s_startup_bypass_candidate = 1u;
-  } else {
-    s_startup_bypass_candidate = 0u;
-  }
-
-  if (s_console_line_len < 0xFFFFu) {
-    s_console_line_len++;
-  }
-
-  return 0;
-}
-
-static const char *LoRaStateName(uint8_t state)
-{
-  switch (state)
-  {
-    case STATE_MANUAL: return "MANUAL";
-    case STATE_AUTO:   return "AUTO";
-    case STATE_PAUSE:  return "PAUSE";
-    case STATE_ERROR:  return "ERROR";
-    case STATE_ESTOP:  return "ESTOP";
-    default:           return "UNKNOWN";
-  }
-}
-
-static void LoRa_SendMainLoopAck(const char *prefix, const char *payload)
-{
-  char ack_msg[96];
-  size_t payload_len = 0;
-
-  if (!prefix || prefix[0] == '\0') {
-    prefix = "ACK:RX";
-  }
-
-  if (payload && payload[0] != '\0') {
-    payload_len = strcspn(payload, "\r\n");
-    if (payload_len > 48u) {
-      payload_len = 48u;
-    }
-  }
-
-  if (payload_len > 0u) {
-    snprintf(ack_msg, sizeof(ack_msg), "%s:%.*s", prefix, (int)payload_len, payload);
-  } else {
-    snprintf(ack_msg, sizeof(ack_msg), "%s", prefix);
-  }
-
-  LoRA_SendRaw(ack_msg);
-}
 
 static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
 {
@@ -237,43 +166,6 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
 
   printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
   printf("[LoRa] manual cmd: %s -> M1=%d M2=%d\r\n", cmd_name, m1_speed, m2_speed);
-}
-
-static void EnforceLoRaLinkFailsafeIfNeeded(uint32_t now_ms)
-{
-  RobotState_t current_state = RobotSM_Current(&g_sm);
-  if (current_state != STATE_AUTO) {
-    return;
-  }
-
-  uint32_t last_rx_ms = LoRA_GetLastRxMs();
-  if (last_rx_ms == 0u) {
-    return;
-  }
-
-  if ((now_ms - last_rx_ms) <= LORA_LINK_FAILSAFE_TIMEOUT_MS) {
-    return;
-  }
-
-  if ((now_ms - s_lora_link_failsafe_last_ms) < LORA_LINK_FAILSAFE_COOLDOWN_MS) {
-    return;
-  }
-
-  s_lora_link_failsafe_last_ms = now_ms;
-
-  Console_SendSafeState();
-
-#if LORA_LINK_FAILSAFE_USE_ESTOP
-  RobotSM_Request(&g_sm, STATE_ESTOP);
-  LoRA_SendFault(255, 1);
-  printf("[P0 FAILSAFE] LoRa link stale in AUTO (%lums) -> ESTOP + safe outputs\r\n",
-         (unsigned long)(now_ms - last_rx_ms));
-#else
-  RobotSM_Request(&g_sm, STATE_PAUSE);
-  LoRA_SendFault(255, 0);
-  printf("[P0 FAILSAFE] LoRa link stale in AUTO (%lums) -> PAUSE + safe outputs\r\n",
-         (unsigned long)(now_ms - last_rx_ms));
-#endif
 }
 
 static uint8_t ParseLoRaJsonCmdInMain(const char *frame,
@@ -511,21 +403,6 @@ int main(void)
   printf("[UART MAP] SB-ESP: UART4 TX=PC10 RX=PC11 @9600\r\n");
   printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @115200\r\n");
   Mission_Init();    // Initialize mission management module
-  MissionRestoreInfo_t restored_mission = {0};
-  if (Mission_RestoreInfo(&restored_mission)) {
-      RobotSM_LoadMission(&g_sm, Mission_GetWaypoints(), restored_mission.waypoint_count);
-      if (restored_mission.current_index < g_sm.mission.total_waypoints) {
-          g_sm.mission.current_index = restored_mission.current_index;
-      }
-      g_sm.mission.mission_active = restored_mission.mission_active ? true : false;
-      (void)Mission_PersistCurrent(g_sm.mission.current_index, g_sm.mission.mission_active ? 1u : 0u);
-      printf("[MISSION] Boot restore ready: %u waypoints, index %u, active=%u\r\n",
-             restored_mission.waypoint_count,
-             restored_mission.current_index,
-             restored_mission.mission_active);
-  }
-  HAL_Delay(200);   // Allow SB-ESP time to be ready before issuing safe-state commands
-  Console_SendSafeState(); // Zero all TC-controllable outputs on startup
   HAL_Delay(100);
 
   imu_last_update_ms = HAL_GetTick();
@@ -574,7 +451,9 @@ int main(void)
 
       if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
         uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-        if (Console_HandleStartupBypassKey(ch)) {
+        if (ch == 'S' || ch == 's') {
+          Dispersion_BypassStartupCheck();
+          printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
           continue;
         }
         if (ch == 'T' || ch == 't') {
@@ -595,7 +474,7 @@ int main(void)
   uint32_t last_50hz_ms = HAL_GetTick();
   uint32_t last_1hz_ms = HAL_GetTick();
   uint32_t last_lora_tx_ms = HAL_GetTick();
-  const uint32_t lora_tx_interval_ms = 3000;
+  const uint32_t lora_tx_interval_ms = 10000;
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
     uint8_t startup_mode_sent = 0;
     uint8_t last_test_mode_seen = g_test_mode;
@@ -618,7 +497,9 @@ int main(void)
         // Poll USART2 for console input (non-interrupt, low-latency control)
       if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
           uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-          if (Console_HandleStartupBypassKey(ch)) {
+          if (ch == 'S' || ch == 's') {
+            Dispersion_BypassStartupCheck();
+            printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
             continue;
           }
           Console_RxByte(ch, &g_sm);
@@ -690,21 +571,9 @@ int main(void)
           // Check for incoming LoRA commands and forward to state machine
           uint8_t lora_handled = 0;
           uint8_t lora_cmd = 0;
-            uint32_t raw_count = LoRA_GetRawFrameCount();
-            const char *raw_frame = NULL;
-
-            if (raw_count != last_lora_raw_count_seen) {
-              last_lora_raw_count_seen = raw_count;
-              raw_frame = LoRA_GetLastRawFrame();
-              if (raw_frame && raw_frame[0] != '\0') {
-                printf("[MAIN] LoRa RX raw[%lu]: %s\r\n", raw_count, raw_frame);
-              }
-            }
-
           if (LoRA_GetPendingCommand(&lora_cmd)) {
               RobotSM_Request(&g_sm, (RobotState_t)lora_cmd);
               const char *lora_raw = LoRA_GetLastCommand();
-              LoRa_SendMainLoopAck("ACK:STATE", LoRaStateName(lora_cmd));
               printf("[APP CMD RECEIVED] state=%u\r\n", lora_cmd);
               printf("[LoRa] command received: %s -> state=%u\r\n",
                  (lora_raw && lora_raw[0] != '\0') ? lora_raw : "<empty>",
@@ -719,14 +588,16 @@ int main(void)
             }
 
             if (!lora_handled) {
-              if (raw_frame && raw_frame[0] != '\0') {
+              uint32_t raw_count = LoRA_GetRawFrameCount();
+              if (raw_count != last_lora_raw_count_seen) {
+                last_lora_raw_count_seen = raw_count;
+                const char *raw_frame = LoRA_GetLastRawFrame();
                 LoRA_ManualCommand_t fallback_manual = LORA_MANUAL_CMD_NONE;
                 uint8_t fallback_state = 0;
                 uint8_t fallback_is_state = 0;
                 if (ParseLoRaJsonCmdInMain(raw_frame, &fallback_manual, &fallback_state, &fallback_is_state)) {
                   if (fallback_is_state) {
                     RobotSM_Request(&g_sm, (RobotState_t)fallback_state);
-                    LoRa_SendMainLoopAck("ACK:JSONSTATE", LoRaStateName(fallback_state));
                     printf("[APP CMD RECEIVED] json_state=%u\r\n", fallback_state);
                     printf("[LoRa] JSON command received (main): %s -> state=%u\r\n",
                            (raw_frame && raw_frame[0] != '\0') ? raw_frame : "<empty>",
@@ -734,10 +605,6 @@ int main(void)
                   } else {
                     HandleLoRaManualCommand(fallback_manual);
                   }
-                } else {
-                  LoRa_SendMainLoopAck("ACK:RAW", raw_frame);
-                  printf("[MAIN] LoRa RX acknowledged (unhandled): %s\r\n",
-                         (raw_frame && raw_frame[0] != '\0') ? raw_frame : "<empty>");
                 }
               }
             }
@@ -767,7 +634,6 @@ int main(void)
 
           // Update LoRA periodic tasks (timeout checking, etc.)
           LoRA_Tick(now_ms);
-          EnforceLoRaLinkFailsafeIfNeeded(now_ms);
 
             // ---- 1 Hz status/readout prints (SKIP during test mode) ----
             if ((now_ms - last_1hz_ms) >= 1000 && !g_test_mode)

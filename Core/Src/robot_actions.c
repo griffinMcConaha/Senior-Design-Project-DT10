@@ -168,6 +168,11 @@ static int PID_HeadingControl(float heading_error_deg)
 #define AUTO_AVOID_SIDE_LEFT  -1
 #define AUTO_AVOID_SIDE_RIGHT  1
 
+static uint8_t avoid_phase = 0;
+static int8_t avoid_side = AUTO_AVOID_SIDE_NONE;
+static uint32_t avoid_started_ms = 0;
+static uint32_t avoid_pinch_started_ms = 0;
+
 // Autonomous control mode: GPS path following with heading correction
 void AutonomousControl_Task(void)
 {
@@ -440,6 +445,7 @@ void Handle_Error(void)
 
     // Log periodically (1 Hz) to keep user informed of error state
     static uint32_t last_log = 0;
+    uint32_t now = HAL_GetTick();
 
     if ((now - last_log) >= 1000)
     {
@@ -481,6 +487,7 @@ void Emergency_Stop(void)
     // Note: ESTOP latch is managed by state machine (RobotSM_HandleTransitions)
     // Cannot exit this state without going through PAUSE first
 }
+
 
 
 
