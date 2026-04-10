@@ -118,36 +118,92 @@ volatile uint8_t g_test_mode = 0;         // 1 = stay in test mode until reset
 static uint8_t s_disp_uart4_rx_byte = 0;
 static uint8_t s_lora_uart5_rx_byte = 0;
 
+static int clamp_manual_output(int value, int min_value, int max_value)
+{
+  if (value < min_value) return min_value;
+  if (value > max_value) return max_value;
+  return value;
+}
+
+static int step_toward_manual_output(int current_value, int target_value, int max_step)
+{
+  if (target_value > current_value + max_step) return current_value + max_step;
+  if (target_value < current_value - max_step) return current_value - max_step;
+  return target_value;
+}
+
+static int s_manual_drive_filtered_pct = 0;
+static int s_manual_turn_filtered_pct = 0;
+
 static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
 {
   int m1_speed = 0;
   int m2_speed = 0;
+  int drive_pct = 0;
+  int turn_pct = 0;
   const char *cmd_name = "UNKNOWN";
 
   switch (cmd)
   {
     case LORA_MANUAL_CMD_FORWARD:
       cmd_name = "FORWARD";
+      s_manual_drive_filtered_pct = 48;
+      s_manual_turn_filtered_pct = 0;
       m1_speed = 40;
       m2_speed = 40;
       break;
     case LORA_MANUAL_CMD_BACK:
       cmd_name = "BACK";
+      s_manual_drive_filtered_pct = -42;
+      s_manual_turn_filtered_pct = 0;
       m1_speed = -35;
       m2_speed = -35;
       break;
     case LORA_MANUAL_CMD_LEFT:
       cmd_name = "LEFT";
+      s_manual_drive_filtered_pct = 0;
+      s_manual_turn_filtered_pct = -32;
       m1_speed = -25;
       m2_speed = 25;
       break;
     case LORA_MANUAL_CMD_RIGHT:
       cmd_name = "RIGHT";
+      s_manual_drive_filtered_pct = 0;
+      s_manual_turn_filtered_pct = 32;
       m1_speed = 25;
       m2_speed = -25;
       break;
+    case LORA_MANUAL_CMD_DRIVE: {
+      cmd_name = "DRIVE";
+      const int requested_drive = clamp_manual_output(LoRA_GetManualDrivePct(), -100, 100);
+      const int requested_turn = clamp_manual_output(LoRA_GetManualTurnPct(), -100, 100);
+
+      s_manual_drive_filtered_pct = step_toward_manual_output(s_manual_drive_filtered_pct, requested_drive, 12);
+      s_manual_turn_filtered_pct = step_toward_manual_output(s_manual_turn_filtered_pct, requested_turn, 8);
+
+      drive_pct = s_manual_drive_filtered_pct;
+      turn_pct = s_manual_turn_filtered_pct;
+
+      const int drive_abs = abs(drive_pct);
+      const int turn_abs = abs(turn_pct);
+      if (drive_abs >= 24) {
+        if (turn_abs <= 16) {
+          turn_pct = 0;
+        } else if (turn_abs < drive_abs) {
+          turn_pct = (turn_pct * 35) / 100;
+        }
+      }
+
+      const int drive_component = (drive_pct * 60) / 100;
+      const int turn_component = (turn_pct * 24) / 100;
+      m1_speed = clamp_manual_output(drive_component + turn_component, -68, 68);
+      m2_speed = clamp_manual_output(drive_component - turn_component, -68, 68);
+      break;
+    }
     case LORA_MANUAL_CMD_STOP:
       cmd_name = "STOP";
+      s_manual_drive_filtered_pct = 0;
+      s_manual_turn_filtered_pct = 0;
       m1_speed = 0;
       m2_speed = 0;
       break;
@@ -161,11 +217,19 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
   Sabertooth_SetM2(m2_speed);
 
   char ack_msg[64];
-  snprintf(ack_msg, sizeof(ack_msg), "ACK:%s", cmd_name);
+  if (cmd == LORA_MANUAL_CMD_DRIVE) {
+    snprintf(ack_msg, sizeof(ack_msg), "ACK:%s:%d:%d", cmd_name, drive_pct, turn_pct);
+  } else {
+    snprintf(ack_msg, sizeof(ack_msg), "ACK:%s", cmd_name);
+  }
   LoRA_SendRaw(ack_msg);
 
   printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
-  printf("[LoRa] manual cmd: %s -> M1=%d M2=%d\r\n", cmd_name, m1_speed, m2_speed);
+  if (cmd == LORA_MANUAL_CMD_DRIVE) {
+    printf("[LoRa] manual cmd: %s drive=%d turn=%d -> M1=%d M2=%d\r\n", cmd_name, drive_pct, turn_pct, m1_speed, m2_speed);
+  } else {
+    printf("[LoRa] manual cmd: %s -> M1=%d M2=%d\r\n", cmd_name, m1_speed, m2_speed);
+  }
 }
 
 static uint8_t ParseLoRaJsonCmdInMain(const char *frame,
@@ -394,6 +458,8 @@ int main(void)
   RobotSM_Init(&g_sm, STATE_PAUSE);
   HeadingFusion_Init(&g_hf);
   Sabertooth_Init(&huart1);
+  Sabertooth_SetRampM1(160);
+  Sabertooth_SetRampM2(160);
   Sabertooth_StopAll(); // Ensure motors are stopped on boot/reset
   Proximity_Init();  // Initialize proximity sensors
   Dispersion_Init(&huart4); // Initialize dispersion system (salt + brine) with UART 4
@@ -474,7 +540,7 @@ int main(void)
   uint32_t last_50hz_ms = HAL_GetTick();
   uint32_t last_1hz_ms = HAL_GetTick();
   uint32_t last_lora_tx_ms = HAL_GetTick();
-  const uint32_t lora_tx_interval_ms = 10000;
+  const uint32_t lora_tx_interval_ms = 3000;
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
     uint8_t startup_mode_sent = 0;
     uint8_t last_test_mode_seen = g_test_mode;
@@ -515,8 +581,16 @@ int main(void)
       }
       last_test_mode_seen = g_test_mode;
 
-      // Test mode bypasses autonomous/manual control loop (diagnostics only)
+      // Test mode bypasses autonomous/manual control actions, but still emits a
+      // lightweight LoRa heartbeat so the rest of the stack can tell the STM is alive.
       if (g_test_mode) {
+        LoRA_Tick(now_ms);
+        if ((now_ms - last_lora_tx_ms) >= lora_tx_interval_ms) {
+          last_lora_tx_ms = now_ms;
+          LoRA_SendState(RobotSM_Current(&g_sm),
+                         gps->latitude_deg, gps->longitude_deg,
+                         Sabertooth_GetM1(), Sabertooth_GetM2());
+        }
         HAL_Delay(10);
         continue; // stay in test mode until reset
       }
@@ -565,8 +639,8 @@ int main(void)
 	  	  RobotSM_HandleTransitions(&g_sm);
 	  	  RobotSM_Update(&g_sm);
 
-	  	  // LEDs
-	  	  SystemHealth_UpdateLeds(RobotSM_Current(&g_sm), imu_ok, gps->has_fix);
+                 // LEDs
+                 SystemHealth_UpdateLeds(RobotSM_Current(&g_sm), imu_ok, gps->has_fix);
 
           // Check for incoming LoRA commands and forward to state machine
           uint8_t lora_handled = 0;

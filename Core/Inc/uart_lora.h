@@ -14,6 +14,7 @@ typedef enum {
     LORA_MANUAL_CMD_BACK,
     LORA_MANUAL_CMD_LEFT,
     LORA_MANUAL_CMD_RIGHT,
+    LORA_MANUAL_CMD_DRIVE,
     LORA_MANUAL_CMD_STOP
 } LoRA_ManualCommand_t;
 
@@ -64,6 +65,10 @@ uint8_t LoRA_GetPendingCommand(uint8_t *out_state);
 // Get pending manual drive command from LoRa text/JSON command input
 // Returns: 1 if command available, 0 otherwise
 uint8_t LoRA_GetPendingManualCommand(LoRA_ManualCommand_t *out_cmd);
+
+// Get the latest joystick-style drive/turn request percentages [-100..100]
+int LoRA_GetManualDrivePct(void);
+int LoRA_GetManualTurnPct(void);
 
 // Get last command for debugging
 const char* LoRA_GetLastCommand(void);

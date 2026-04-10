@@ -18,6 +18,7 @@
 #define LORA_COMMAND_TIMEOUT_MS 5000
 #define LORA_STREAM_BUFFER_SIZE 512
 #define LORA_TX_DIAGNOSTICS_ENABLED 1
+#define LORA_UART_TX_TIMEOUT_MS 250
 
 typedef struct {
     UART_HandleTypeDef *huart;
@@ -36,6 +37,8 @@ typedef struct {
     uint8_t pending_state_request; // 0=none, else state value
     LoRA_ManualCommand_t pending_manual_cmd;
     uint8_t manual_command_valid;
+    int8_t manual_drive_pct;
+    int8_t manual_turn_pct;
     uint8_t command_valid;
     uint8_t stream_seq_init;
     uint32_t stream_expected_seq;
@@ -47,6 +50,31 @@ typedef struct {
 
 static LoRA_State_t lora_state = {0};
 static uint8_t s_lora_verbose = 0;
+
+static int8_t lora_clamp_percent(int value)
+{
+    if (value > 100) return 100;
+    if (value < -100) return -100;
+    return (int8_t)value;
+}
+
+static uint8_t lora_parse_percent_field(const char *payload, const char *key, int8_t *out_value)
+{
+    if (!payload || !key || !out_value) return 0;
+
+    char pattern[24];
+    snprintf(pattern, sizeof(pattern), "%s:", key);
+    const char *field = strstr(payload, pattern);
+    if (!field) return 0;
+
+    field += strlen(pattern);
+    char *endptr = NULL;
+    long parsed = strtol(field, &endptr, 10);
+    if (endptr == field) return 0;
+
+    *out_value = lora_clamp_percent((int)parsed);
+    return 1;
+}
 
 static Waypoint_t s_lora_wp_buf[MAX_WAYPOINTS];
 static uint8_t s_lora_wp_count = 0;
@@ -151,6 +179,22 @@ static uint8_t lora_parse_manual_request(const char *cmd, LoRA_ManualCommand_t *
         payload += 4;
     }
 
+    if (strncmp(payload, "DRIVE", 5) == 0 || strncmp(payload, "JOY", 3) == 0 || strncmp(payload, "JOYSTICK", 8) == 0) {
+        int8_t drive_pct = 0;
+        int8_t turn_pct = 0;
+        uint8_t have_drive = lora_parse_percent_field(payload, "THROTTLE", &drive_pct)
+            || lora_parse_percent_field(payload, "DRIVE", &drive_pct);
+        uint8_t have_turn = lora_parse_percent_field(payload, "TURN", &turn_pct)
+            || lora_parse_percent_field(payload, "STEER", &turn_pct);
+
+        if (have_drive || have_turn) {
+            lora_state.manual_drive_pct = drive_pct;
+            lora_state.manual_turn_pct = turn_pct;
+            *out_cmd = LORA_MANUAL_CMD_DRIVE;
+            return 1;
+        }
+    }
+
     if (strcmp(payload, "FORWARD") == 0) {
         *out_cmd = LORA_MANUAL_CMD_FORWARD;
         return 1;
@@ -204,7 +248,20 @@ static void lora_uart5_send(const char *msg, const char *tag)
     if (!lora_state.huart || !msg) return;
 
 #if LORA_TX_DIAGNOSTICS_ENABLED
-    HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, strlen(msg), HAL_MAX_DELAY);
+    HAL_StatusTypeDef tx_status = HAL_UART_Transmit(
+        lora_state.huart,
+        (uint8_t *)msg,
+        strlen(msg),
+        LORA_UART_TX_TIMEOUT_MS);
+
+    if (tx_status != HAL_OK) {
+        SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
+        if (s_lora_verbose) {
+            printf("[LORA] TX failed for %s (status=%d)\r\n", tag ? tag : "payload", (int)tx_status);
+        }
+        return;
+    }
+
     strncpy(lora_state.last_tx_payload, msg, sizeof(lora_state.last_tx_payload) - 1);
     lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
     lora_state.last_tx_ms = HAL_GetTick();
@@ -263,6 +320,8 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.pending_state_request = 0;
     lora_state.pending_manual_cmd = LORA_MANUAL_CMD_NONE;
     lora_state.manual_command_valid = 0;
+    lora_state.manual_drive_pct = 0;
+    lora_state.manual_turn_pct = 0;
     lora_state.stream_seq_init = 0;
     lora_state.stream_expected_seq = 0;
     lora_state.stream_gap_count = 0;
@@ -604,11 +663,11 @@ void LoRA_SendTelemetry(uint8_t state, float gps_lat, float gps_lon, uint8_t gps
         snprintf(prox_right_json, sizeof(prox_right_json), "%u", prox_right_cm);
     }
 
-    // JSON format with proximity sensors
-    char msg[320];
+    // JSON format with proximity sensors plus an uptime heartbeat for easier tracing
+    char msg[384];
     snprintf(msg, sizeof(msg),
-             "{\"state\":\"%s\",\"gps\":{\"lat\":%.4f,\"lon\":%.4f,\"fix\":%u,\"sat\":%u,\"hdop\":%.1f},\"motor\":{\"m1\":%d,\"m2\":%d},\"heading\":{\"yaw\":%.1f,\"pitch\":%.1f},\"disp\":{\"salt\":%u,\"brine\":%u},\"temp\":%.1f,\"prox\":{\"left\":%s,\"right\":%s}}\r\n",
-             state_name, gps_lat, gps_lon, gps_has_fix, gps_num_sat, gps_hdop,
+             "{\"state\":\"%s\",\"uptime_ms\":%lu,\"gps\":{\"lat\":%.4f,\"lon\":%.4f,\"fix\":%u,\"sat\":%u,\"hdop\":%.1f},\"motor\":{\"m1\":%d,\"m2\":%d},\"heading\":{\"yaw\":%.1f,\"pitch\":%.1f},\"disp\":{\"salt\":%u,\"brine\":%u},\"temp\":%.1f,\"prox\":{\"left\":%s,\"right\":%s}}\r\n",
+             state_name, (unsigned long)HAL_GetTick(), gps_lat, gps_lon, gps_has_fix, gps_num_sat, gps_hdop,
              motor_m1, motor_m2, yaw_deg, pitch_deg, salt_rate, brine_rate, temp_c,
              prox_left_json, prox_right_json);
 
@@ -678,6 +737,16 @@ uint8_t LoRA_GetPendingManualCommand(LoRA_ManualCommand_t *out_cmd)
     return 0;
 }
 
+int LoRA_GetManualDrivePct(void)
+{
+    return (int)lora_state.manual_drive_pct;
+}
+
+int LoRA_GetManualTurnPct(void)
+{
+    return (int)lora_state.manual_turn_pct;
+}
+
 // Get last command for debugging
 const char* LoRA_GetLastCommand(void)
 {
@@ -721,7 +790,15 @@ void LoRA_SendRaw(const char *text)
         msg[in_len] = '\0';
     }
 
-    HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, in_len, HAL_MAX_DELAY);
+    HAL_StatusTypeDef tx_status = HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, in_len, LORA_UART_TX_TIMEOUT_MS);
+    if (tx_status != HAL_OK) {
+        SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
+        if (s_lora_verbose) {
+            printf("[LORA] Raw TX failed (status=%d)\r\n", (int)tx_status);
+        }
+        return;
+    }
+
     strncpy(lora_state.last_tx_payload, msg, sizeof(lora_state.last_tx_payload) - 1);
     lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
     lora_state.last_tx_ms = HAL_GetTick();
