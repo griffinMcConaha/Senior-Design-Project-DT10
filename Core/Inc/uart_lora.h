@@ -73,6 +73,10 @@ void LoRA_SendFault(uint8_t fault_code, uint8_t action);
 // Sets *out_state to requested state if valid command received
 uint8_t LoRA_GetPendingCommand(uint8_t *out_state);
 
+// Get pending RESET request command (used for explicit ESTOP unlatch flow).
+// Returns 1 if RESET was requested, 0 otherwise.
+uint8_t LoRA_GetPendingResetRequest(void);
+
 // Get pending manual drive command from LoRa text/JSON command input
 // Returns: 1 if command available, 0 otherwise
 uint8_t LoRA_GetPendingManualCommand(LoRA_ManualCommand_t *out_cmd);

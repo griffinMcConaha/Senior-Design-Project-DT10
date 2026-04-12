@@ -654,15 +654,16 @@ uint8_t IMU_CheckAndRecover(void)
     }
 
     printf(ANSI_YELLOW "[IMU] Recovery: Attempting re-initialization...\r\n" ANSI_RESET);
+    uint8_t was_calibrated = s_calibrated;
     s_init_ok = 0;
     s_last_ok = 0;
-    s_calibrated = 0;
+    s_calibrated = was_calibrated;
 
     IMU_Init(s_hi2c);
 
     if (s_init_ok) {
         printf(ANSI_GREEN "[IMU] Recovery SUCCESS: IMU back online\r\n" ANSI_RESET);
-        IMU_Calibrate(200, 5);
+        // Keep recovery non-blocking: reuse existing biases and skip full recalibration.
         return 1;
     }
 

@@ -57,6 +57,7 @@ void RobotSM_OnEnter(RobotState_t s, RobotSM_t *sm)
             Stop_Motors();
             if (sm) {
                 sm->estop_latched = true;
+                sm->estop_reset_requested = false;
                 if (sm->mission.waypoints && sm->mission.total_waypoints > 0) {
                     sm->mission.mission_active = false;
                     PersistMissionState(sm);
@@ -139,6 +140,7 @@ void RobotSM_Init(RobotSM_t *sm, RobotState_t initial_state)
     sm->fault_code = FAULT_NONE;
     sm->fault_timestamp_ms = 0;
     sm->estop_latched = false;
+    sm->estop_reset_requested = false;
 
     // Initialize mission state
     sm->mission.waypoints = NULL;
@@ -162,6 +164,15 @@ void RobotSM_Request(RobotSM_t *sm, RobotState_t new_state)
                StateToString(sm->current), StateToString(new_state));
         sm->requested = new_state;
     }
+}
+
+void RobotSM_RequestEstopReset(RobotSM_t *sm)
+{
+    if (!sm) return;
+
+    sm->estop_reset_requested = true;
+    sm->requested = STATE_PAUSE;
+    printf("[SM] ESTOP reset requested (RESET command)\r\n");
 }
 
 // Set fault code and record timestamp (transition to ERROR is handled here)
@@ -267,26 +278,21 @@ void RobotSM_HandleTransitions(RobotSM_t *sm)
     RobotState_t from = sm->current;
     RobotState_t to = sm->requested;
 
-    // ESTOP recovery path: allow operator-requested recovery states after
-    // health-layer reset succeeds. This keeps ESTOP fail-safe while avoiding
-    // command dead-ends in field operation.
-    if (from == STATE_ESTOP && sm->estop_latched &&
-        (to == STATE_PAUSE || to == STATE_MANUAL || to == STATE_AUTO))
+    // ESTOP recovery path requires explicit RESET request first.
+    if (from == STATE_ESTOP && sm->estop_latched)
     {
+        if (!sm->estop_reset_requested) {
+            printf("[SM] SAFETY: ESTOP latched - send RESET before recovery\r\n");
+            return;
+        }
         if (!SystemHealth_ResetEmergencyStop()) {
             printf("[SM] SAFETY: ESTOP health reset rejected\r\n");
             return;
         }
         sm->estop_latched = false;
+        sm->estop_reset_requested = false;
         printf("[SM] ESTOP latch cleared - robot ready for commands\r\n");
         Emergency_Stop_ResetOnce();
-    }
-
-    // SAFETY RULE 1: ESTOP latches - can only exit via explicit reset through PAUSE
-    if (sm->estop_latched && to != STATE_PAUSE)
-    {
-        printf("[SM] SAFETY: ESTOP latched - must transition through PAUSE first\r\n");
-        return;
     }
 
     // SAFETY RULE 2: Cannot transition directly from ERROR to MANUAL/AUTO

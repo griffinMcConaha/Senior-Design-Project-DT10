@@ -20,6 +20,7 @@
 
 #define GPS_NMEA_SILENT_SWITCH_MS 6000u
 #define GPS_BAUD_SWITCH_COOLDOWN_MS 8000u
+#define GPS_UART_ACTIVE_MS 2000u
 
 // Module-level UART handle and receive buffer
 static UART_HandleTypeDef *s_huart = NULL;
@@ -70,10 +71,6 @@ static void GPS_AutoBaudTick(uint32_t now_ms)
 {
 #if GPS_AUTO_BAUD_ENABLED
     if (!s_huart) return;
-    if (s_last_rx_ms == 0u) return;
-
-    // If there has been no recent UART traffic, don't churn baud rates.
-    if ((now_ms - s_last_rx_ms) > 2000u) return;
 
     // If valid NMEA lines are arriving recently, keep current baud.
     if (s_last_nmea_ms != 0u && (now_ms - s_last_nmea_ms) <= GPS_NMEA_SILENT_SWITCH_MS) {
@@ -81,6 +78,12 @@ static void GPS_AutoBaudTick(uint32_t now_ms)
     }
 
     if ((now_ms - s_last_baud_switch_ms) < GPS_BAUD_SWITCH_COOLDOWN_MS) {
+        return;
+    }
+
+    // Switch baud if there is no UART activity yet, UART activity is stale,
+    // or bytes are present but no valid NMEA has been parsed for a while.
+    if (s_last_rx_ms != 0u && (now_ms - s_last_rx_ms) <= GPS_UART_ACTIVE_MS && s_last_nmea_ms != 0u) {
         return;
     }
 
@@ -375,6 +378,9 @@ void GPS_Tick(uint32_t now_ms)
     } else if (s_gps.has_fix) {
         // GPS is locked and receiving data
         SystemHealth_SetSensorStatus(SENSOR_GPS, SENSOR_OK);
+    } else if (s_last_rx_ms != 0u) {
+        // GPS UART is alive but there is no fix yet: degraded, not timeout.
+        SystemHealth_SetSensorStatus(SENSOR_GPS, SENSOR_DEGRADED);
     } else {
         // GPS is running but no fix yet
         SystemHealth_SetSensorStatus(SENSOR_GPS, SENSOR_TIMEOUT);
@@ -464,6 +470,15 @@ uint8_t GPS_CheckAndRecover(void)
     GPS_Reset();
     __HAL_UART_CLEAR_OREFLAG(s_huart);
 
+    // If bytes have never flowed (or have been stale for a long time),
+    // advance baud before re-arming RX to avoid being stuck at a wrong baud.
+    uint32_t now_ms = HAL_GetTick();
+    if (s_rx_byte_count == 0u || (s_last_rx_ms != 0u && (now_ms - s_last_rx_ms) > 15000u)) {
+        s_gps_baud_index = (uint8_t)((s_gps_baud_index + 1u) % (sizeof(s_gps_baud_table) / sizeof(s_gps_baud_table[0])));
+        s_last_baud_switch_ms = now_ms;
+        GPS_SwitchToBaud(s_gps_baud_table[s_gps_baud_index]);
+    }
+
     // Re-enable RX interrupt. HAL_BUSY here usually means RX is already armed.
     HAL_StatusTypeDef status = HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
     if (status == HAL_OK || status == HAL_BUSY) {
@@ -474,7 +489,18 @@ uint8_t GPS_CheckAndRecover(void)
         }
         return 1;
     } else {
-        printf("[GPS] Recovery FAILED: Could not re-enable RX (error %d)\r\n", status);
+        printf("[GPS] Recovery: RX re-arm failed (%d), reinitializing UART...\r\n", status);
+        (void)HAL_UART_DeInit(s_huart);
+        if (HAL_UART_Init(s_huart) == HAL_OK) {
+            HAL_StatusTypeDef retry = HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
+            if (retry == HAL_OK || retry == HAL_BUSY) {
+                printf("[GPS] Recovery: UART reinitialized\r\n");
+                return 1;
+            }
+            printf("[GPS] Recovery FAILED: UART reinit done but RX re-arm failed (%d)\r\n", retry);
+            return 0;
+        }
+        printf("[GPS] Recovery FAILED: UART reinit failed\r\n");
         return 0;
     }
 }

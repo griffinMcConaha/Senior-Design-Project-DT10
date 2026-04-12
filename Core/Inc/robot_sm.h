@@ -56,6 +56,7 @@ typedef struct {
     uint32_t fault_timestamp_ms; // When fault occurred
     MissionState_t mission;      // Mission data for autonomous mode
     bool estop_latched;          // True if ESTOP activated (blocks auto-recovery)
+    bool estop_reset_requested;  // True after explicit RESET command/request
 } RobotSM_t;
 
 // Initialize state machine with given starting state
@@ -63,6 +64,9 @@ void RobotSM_Init(RobotSM_t *sm, RobotState_t initial_state);
 
 // Request a state transition (validated during HandleTransitions)
 void RobotSM_Request(RobotSM_t *sm, RobotState_t new_state);
+
+// Request explicit ESTOP reset flow. This is the only way ESTOP latch can clear.
+void RobotSM_RequestEstopReset(RobotSM_t *sm);
 
 // Set fault code and record timestamp (called when transitioning to STATE_ERROR)
 void RobotSM_SetFault(RobotSM_t *sm, FaultCode_t fault);

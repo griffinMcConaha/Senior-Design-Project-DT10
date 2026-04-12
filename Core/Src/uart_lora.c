@@ -19,7 +19,7 @@
 #define LORA_STREAM_BUFFER_SIZE 512
 #define LORA_ISR_QUEUE_SIZE 512
 #define LORA_TX_DIAGNOSTICS_ENABLED 1
-#define LORA_UART_TX_TIMEOUT_MS 250
+#define LORA_UART_TX_TIMEOUT_MS 40
 #define LORA_TX_FAIL_TIMEOUT_STREAK 5u
 #define LORA_HEALTH_INACTIVE_MS 45000u
 #define LORA_HEALTH_STALE_TICKS_TO_TIMEOUT 5u
@@ -40,6 +40,7 @@ typedef struct {
     char last_command[128];
     char last_tx_payload[320];
     uint8_t pending_state_request; // 0=none, else state value
+    uint8_t pending_reset_request;
     LoRA_ManualCommand_t pending_manual_cmd;
     uint8_t manual_command_valid;
     int8_t manual_drive_pct;
@@ -226,8 +227,7 @@ static uint8_t lora_parse_state_request(const char *cmd, uint8_t *out_state)
         return 1;
     }
     if (strcmp(payload, LORA_CMD_RESET) == 0) {
-        *out_state = STATE_PAUSE;
-        return 1;
+        return 2;
     }
 
     return 0;
@@ -426,6 +426,7 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.rx_count = 0;
     lora_state.tx_count = 0;
     lora_state.pending_state_request = 0;
+    lora_state.pending_reset_request = 0;
     lora_state.pending_manual_cmd = LORA_MANUAL_CMD_NONE;
     lora_state.manual_command_valid = 0;
     lora_state.manual_drive_pct = 0;
@@ -546,13 +547,23 @@ static void lora_process_rx_byte(uint8_t byte)
                 }
             }
 
-            if (lora_parse_state_request(cmd, &lora_state.pending_state_request))
+            uint8_t parsed_state_cmd = lora_parse_state_request(cmd, &lora_state.pending_state_request);
+            if (parsed_state_cmd == 1)
             {
                 lora_state.command_valid = 1;
                 strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
                 lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
                 if (s_lora_verbose) {
                     printf("[LORA] Valid command: %s -> state=%u\r\n", cmd, lora_state.pending_state_request);
+                }
+            }
+            else if (parsed_state_cmd == 2)
+            {
+                lora_state.pending_reset_request = 1;
+                strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+                lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+                if (s_lora_verbose) {
+                    printf("[LORA] Valid reset request: %s\r\n", cmd);
                 }
             }
             else if (lora_parse_manual_request(cmd, &lora_state.pending_manual_cmd))
@@ -779,15 +790,22 @@ void LoRA_SendManualTelemetry(int motor_m1, int motor_m2,
 {
     if (!lora_state.huart) return;
 
+    const uint8_t imu_ok = (SystemHealth_GetSensorStatus(SENSOR_IMU) == SENSOR_OK) ? 1u : 0u;
+    const uint8_t gps_ok = (SystemHealth_GetSensorStatus(SENSOR_GPS) == SENSOR_OK) ? 1u : 0u;
+    const uint8_t lora_ok = (SystemHealth_GetSensorStatus(SENSOR_LORA) == SENSOR_OK) ? 1u : 0u;
+    const uint8_t degraded = (imu_ok && gps_ok && lora_ok) ? 0u : 1u;
+
     // Compact JSON: ~80 bytes on the wire — fast to transmit over LoRa.
     // "s" = state (always MANUAL here), "m1"/"m2" = motor %, "h" = heading,
     // "pl"/"pr" = proximity cm (9999 = no detection).
-    char msg[100];
+    // "imu"/"gps"/"lora" = health flags, "deg" = any degraded sensor.
+    char msg[160];
     snprintf(msg, sizeof(msg),
-             "{\"s\":\"MANUAL\",\"m1\":%d,\"m2\":%d,\"h\":%.1f,\"pl\":%u,\"pr\":%u}\r\n",
+             "{\"s\":\"MANUAL\",\"m1\":%d,\"m2\":%d,\"h\":%.1f,\"pl\":%u,\"pr\":%u,\"imu\":%u,\"gps\":%u,\"lora\":%u,\"deg\":%u}\r\n",
              motor_m1, motor_m2, yaw_deg,
              (prox_left_cm  == 65535u) ? 9999u : (unsigned)prox_left_cm,
-             (prox_right_cm == 65535u) ? 9999u : (unsigned)prox_right_cm);
+             (prox_right_cm == 65535u) ? 9999u : (unsigned)prox_right_cm,
+             (unsigned)imu_ok, (unsigned)gps_ok, (unsigned)lora_ok, (unsigned)degraded);
 
     lora_uart5_send(msg, "manual");
 }
@@ -868,6 +886,17 @@ uint8_t LoRA_GetPendingCommand(uint8_t *out_state)
     {
         *out_state = lora_state.pending_state_request;
         lora_state.command_valid = 0;
+        return 1;
+    }
+
+    return 0;
+}
+
+uint8_t LoRA_GetPendingResetRequest(void)
+{
+    if (lora_state.pending_reset_request)
+    {
+        lora_state.pending_reset_request = 0;
         return 1;
     }
 

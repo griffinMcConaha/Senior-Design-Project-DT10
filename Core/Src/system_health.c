@@ -187,11 +187,15 @@ uint8_t SystemHealth_SafetyCheck(const SystemHealthInputs_t *in,
         return 1;
     }
 
-    // Next: IMU failure => ESTOP
+    // Next: IMU failure => ESTOP only in autonomous mode.
+    // In manual/pause, allow operation with degraded sensor status and
+    // communicate degradation upstream; do not force an ESTOP loop.
     if (!in->imu_ok) {
-        *out_request_state = STATE_ESTOP;
-        SystemHealth_TriggerEmergencyStop("IMU failure - cannot navigate safely");
-        return 1;
+        if (current == STATE_AUTO) {
+            *out_request_state = STATE_ESTOP;
+            SystemHealth_TriggerEmergencyStop("IMU failure - cannot navigate safely");
+            return 1;
+        }
     }
 
     // GPS no-fix => ERROR only when running autonomously.

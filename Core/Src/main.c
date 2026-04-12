@@ -271,10 +271,10 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
         }
       }
 
-      const int drive_component = (drive_pct * 60) / 100;
-      const int turn_component = (turn_pct * 24) / 100;
-      m1_speed = clamp_manual_output(drive_component + turn_component, -68, 68);
-      m2_speed = clamp_manual_output(drive_component - turn_component, -68, 68);
+      const int drive_component = (drive_pct * 78) / 100;
+      const int turn_component = (turn_pct * 30) / 100;
+      m1_speed = clamp_manual_output(drive_component + turn_component, -85, 85);
+      m2_speed = clamp_manual_output(drive_component - turn_component, -85, 85);
       break;
     }
     case LORA_MANUAL_CMD_STOP:
@@ -572,8 +572,8 @@ int main(void)
   LoRA_Init(&huart5);       // Initialize LoRA remote control via UART 5
   HAL_UART_Receive_IT(&huart4, &s_disp_uart4_rx_byte, 1);
   HAL_UART_Receive_IT(&huart5, &s_lora_uart5_rx_byte, 1);
-  printf("[UART MAP] SB-ESP: UART4 TX=PC10 RX=PC11 @9600\r\n");
-  printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @115200\r\n");
+  printf("[UART MAP] SB-ESP: UART4 TX=PC10 RX=PC11 @230400\r\n");
+  printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @460800\r\n");
   Mission_Init();    // Initialize mission management module
   HAL_Delay(100);
 
@@ -648,10 +648,12 @@ int main(void)
   uint32_t last_50hz_ms = HAL_GetTick();
   uint32_t last_1hz_ms = HAL_GetTick();
   uint32_t last_1hz_status_ms = HAL_GetTick();
+  uint32_t last_sabertooth_poll_ms = HAL_GetTick();
+  const uint32_t status_print_interval_ms = 3000;
   uint32_t last_lora_tx_ms = HAL_GetTick();
   uint32_t last_manual_lora_tx_ms = HAL_GetTick();
-  const uint32_t lora_tx_interval_ms = 300;
-  const uint32_t lora_manual_tx_interval_ms = 80;  // ~12.5 Hz during manual drive
+  const uint32_t lora_tx_interval_ms = 800;
+  const uint32_t lora_manual_tx_interval_ms = 180;  // balanced latency without starving sensor loop
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
     uint8_t startup_mode_sent = 0;
     uint8_t last_test_mode_seen = g_test_mode;
@@ -679,7 +681,7 @@ int main(void)
 	  const GPS_Data_t *gps = GPS_Get();
 
       // Keep LoRa draining steady while prioritizing interactive console latency.
-      LoRA_ProcessRxQueue(96);
+      LoRA_ProcessRxQueue(64);
 
       if (startup_mode_sent && g_test_mode && !last_test_mode_seen) {
           Dispersion_BypassStartupCheck();
@@ -718,8 +720,65 @@ int main(void)
         continue; // stay in test mode until reset
       }
 
-      // Poll Sabertooth feedback (battery voltage, motor current, temperature)
-      Sabertooth_PollFeedback();
+      // Fast command path: process incoming LoRa commands every loop iteration
+      // so manual control and RESET are responsive even if sensor tasks stall.
+      {
+        uint8_t lora_handled_fast = 0;
+        if (LoRA_GetPendingResetRequest()) {
+          uint32_t lora_age_ms = (LoRA_GetLastRxMs() > 0u) ? (now_ms - LoRA_GetLastRxMs()) : 0u;
+          RobotSM_RequestEstopReset(&g_sm);
+          printf("[APP CMD RECEIVED] reset=1 (age=%lums)\r\n", (unsigned long)lora_age_ms);
+          lora_handled_fast = 1;
+        }
+
+        uint8_t lora_cmd_fast = 0;
+        if (LoRA_GetPendingCommand(&lora_cmd_fast)) {
+          uint32_t lora_age_ms = (LoRA_GetLastRxMs() > 0u) ? (now_ms - LoRA_GetLastRxMs()) : 0u;
+          RobotSM_Request(&g_sm, (RobotState_t)lora_cmd_fast);
+          const char *lora_raw_fast = LoRA_GetLastCommand();
+          printf("[APP CMD RECEIVED] state=%u (age=%lums)\r\n", lora_cmd_fast, (unsigned long)lora_age_ms);
+          printf("[LoRa] command received: %s -> state=%u\r\n",
+                 (lora_raw_fast && lora_raw_fast[0] != '\0') ? lora_raw_fast : "<empty>",
+                 lora_cmd_fast);
+          lora_handled_fast = 1;
+        }
+
+        LoRA_ManualCommand_t lora_manual_cmd_fast = LORA_MANUAL_CMD_NONE;
+        if (LoRA_GetPendingManualCommand(&lora_manual_cmd_fast)) {
+          uint32_t lora_age_ms = (LoRA_GetLastRxMs() > 0u) ? (now_ms - LoRA_GetLastRxMs()) : 0u;
+          HandleLoRaManualCommand(lora_manual_cmd_fast);
+          printf("[LoRa] manual dispatch age=%lums\r\n", (unsigned long)lora_age_ms);
+          lora_handled_fast = 1;
+        }
+
+        if (!lora_handled_fast) {
+          uint32_t raw_count_fast = LoRA_GetRawFrameCount();
+          if (raw_count_fast != last_lora_raw_count_seen) {
+            last_lora_raw_count_seen = raw_count_fast;
+            const char *raw_frame_fast = LoRA_GetLastRawFrame();
+            LoRA_ManualCommand_t fallback_manual_fast = LORA_MANUAL_CMD_NONE;
+            uint8_t fallback_state_fast = 0;
+            uint8_t fallback_is_state_fast = 0;
+            if (ParseLoRaJsonCmdInMain(raw_frame_fast, &fallback_manual_fast, &fallback_state_fast, &fallback_is_state_fast)) {
+              if (fallback_is_state_fast) {
+                RobotSM_Request(&g_sm, (RobotState_t)fallback_state_fast);
+                printf("[APP CMD RECEIVED] json_state=%u\r\n", fallback_state_fast);
+                printf("[LoRa] JSON command received (main): %s -> state=%u\r\n",
+                       (raw_frame_fast && raw_frame_fast[0] != '\0') ? raw_frame_fast : "<empty>",
+                       fallback_state_fast);
+              } else {
+                HandleLoRaManualCommand(fallback_manual_fast);
+              }
+            }
+          }
+        }
+      }
+
+      // Poll Sabertooth feedback at a bounded cadence to keep loop responsive.
+      if ((now_ms - last_sabertooth_poll_ms) >= 50u) {
+        last_sabertooth_poll_ms = now_ms;
+        Sabertooth_PollFeedback();
+      }
 
         if ((now_ms - last_50hz_ms) >= 20)
       {
@@ -727,23 +786,36 @@ int main(void)
 
           static IMU_Status_t imu_last;
           static uint32_t imu_consecutive_failures = 0;
-          IMU_Status_t imu = IMU_Read();
-          imu_last = imu;
+          static uint32_t next_imu_sample_ms = 0;
+          IMU_Status_t imu = imu_last;
+          uint8_t imu_sample_attempted = 0;
 
-          if (imu.ok)
+          if (now_ms >= next_imu_sample_ms) {
+            imu = IMU_Read();
+            imu_last = imu;
+            imu_sample_attempted = 1;
+          }
+
+          if (imu_sample_attempted && imu.ok)
           {
             imu_consecutive_failures = 0;
             imu_ok = 1;
 		  /* Use fixed 50 Hz timestep (20 ms) for consistency */
 		  float dt = 0.02f;
 		  imu_last_update_ms = now_ms;
+            next_imu_sample_ms = now_ms + 20u;
 
 		  HeadingFusion_Update(&g_hf, &imu, gps, dt);
 
           }
-          else
+          else if (imu_sample_attempted)
           {
             imu_consecutive_failures++;
+            imu_ok = ((imu_consecutive_failures < 10u) || ((now_ms - imu_last_update_ms) <= 2000u)) ? 1u : 0u;
+            next_imu_sample_ms = now_ms + ((imu_consecutive_failures >= 5u) ? 200u : 20u);
+          }
+          else
+          {
             imu_ok = ((imu_consecutive_failures < 10u) || ((now_ms - imu_last_update_ms) <= 2000u)) ? 1u : 0u;
           }
 
@@ -814,47 +886,6 @@ int main(void)
               }
           }
 
-            // Check for incoming LoRA commands and forward to state machine
-            uint8_t lora_handled = 0;
-            uint8_t lora_cmd = 0;
-          if (LoRA_GetPendingCommand(&lora_cmd)) {
-              RobotSM_Request(&g_sm, (RobotState_t)lora_cmd);
-              const char *lora_raw = LoRA_GetLastCommand();
-              printf("[APP CMD RECEIVED] state=%u\r\n", lora_cmd);
-              printf("[LoRa] command received: %s -> state=%u\r\n",
-                 (lora_raw && lora_raw[0] != '\0') ? lora_raw : "<empty>",
-                 lora_cmd);
-              lora_handled = 1;
-          }
-
-            LoRA_ManualCommand_t lora_manual_cmd = LORA_MANUAL_CMD_NONE;
-            if (LoRA_GetPendingManualCommand(&lora_manual_cmd)) {
-              HandleLoRaManualCommand(lora_manual_cmd);
-              lora_handled = 1;
-            }
-
-            if (!lora_handled) {
-              uint32_t raw_count = LoRA_GetRawFrameCount();
-              if (raw_count != last_lora_raw_count_seen) {
-                last_lora_raw_count_seen = raw_count;
-                const char *raw_frame = LoRA_GetLastRawFrame();
-                LoRA_ManualCommand_t fallback_manual = LORA_MANUAL_CMD_NONE;
-                uint8_t fallback_state = 0;
-                uint8_t fallback_is_state = 0;
-                if (ParseLoRaJsonCmdInMain(raw_frame, &fallback_manual, &fallback_state, &fallback_is_state)) {
-                  if (fallback_is_state) {
-                    RobotSM_Request(&g_sm, (RobotState_t)fallback_state);
-                    printf("[APP CMD RECEIVED] json_state=%u\r\n", fallback_state);
-                    printf("[LoRa] JSON command received (main): %s -> state=%u\r\n",
-                           (raw_frame && raw_frame[0] != '\0') ? raw_frame : "<empty>",
-                           fallback_state);
-                  } else {
-                    HandleLoRaManualCommand(fallback_manual);
-                  }
-                }
-              }
-            }
-
           // State machine task dispatch (Phase 2 and 3)
           RobotState_t current_state = RobotSM_Current(&g_sm);
           switch (current_state)
@@ -882,9 +913,9 @@ int main(void)
           LoRA_Tick(now_ms);
 
             // ---- 1 Hz status/readout prints (SKIP during test mode) ----
-            if ((now_ms - last_1hz_status_ms) >= 1000 && !g_test_mode)
+            if ((now_ms - last_1hz_status_ms) >= status_print_interval_ms && !g_test_mode)
           {
-              last_1hz_status_ms += 1000;
+              last_1hz_status_ms += status_print_interval_ms;
               
               // Print sensor status (IMU, GPS, fusion)
               Console_PrintStatus(NULL, &imu_last, gps, &g_hf);
@@ -1251,7 +1282,7 @@ static void MX_UART4_Init(void)
 
   /* USER CODE END UART4_Init 1 */
   huart4.Instance = UART4;
-  huart4.Init.BaudRate = 9600;
+  huart4.Init.BaudRate = 230400;
   huart4.Init.WordLength = UART_WORDLENGTH_8B;
   huart4.Init.StopBits = UART_STOPBITS_1;
   huart4.Init.Parity = UART_PARITY_NONE;
@@ -1284,7 +1315,7 @@ static void MX_UART5_Init(void)
 
   /* USER CODE END UART5_Init 1 */
   huart5.Instance = UART5;
-  huart5.Init.BaudRate = 115200;
+  huart5.Init.BaudRate = 460800;
   huart5.Init.WordLength = UART_WORDLENGTH_8B;
   huart5.Init.StopBits = UART_STOPBITS_1;
   huart5.Init.Parity = UART_PARITY_NONE;

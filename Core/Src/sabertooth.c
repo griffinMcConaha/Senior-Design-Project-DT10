@@ -5,6 +5,8 @@
 #include <stdlib.h>
 
 #define SABERTOOTH_VERBOSE_FEEDBACK_PRINTS 0
+#define SABERTOOTH_VERBOSE_COMMAND_PRINTS 0
+#define SABERTOOTH_UART_TX_TIMEOUT_MS 12u
 
 // Module-level UART handle for motor driver communication
 static UART_HandleTypeDef *s_huart = NULL;
@@ -64,9 +66,8 @@ static void sabertooth_send_command(const char *cmd)
 {
     if (s_huart == NULL) return;
     uint16_t len = strlen(cmd);
-    HAL_UART_Transmit(s_huart, (uint8_t *)cmd, len, HAL_MAX_DELAY);
+    HAL_UART_Transmit(s_huart, (uint8_t *)cmd, len, SABERTOOTH_UART_TX_TIMEOUT_MS);
     s_last_cmd_ms = HAL_GetTick();  // Track successful transmission
-    HAL_Delay(5);  // Small delay between commands
 }
 
 // Send a raw plain text serial command, appending CRLF if missing
@@ -163,7 +164,6 @@ void Sabertooth_StopAll(void)
     // Send stop commands to both motors (speed = 0)
     sabertooth_send_command("M1: 0\r\n");
     sabertooth_send_command("M2: 0\r\n");
-    HAL_Delay(5);
 }
 
 // Set M1 motor speed in percent: -100 (reverse) to +100 (forward)
@@ -183,7 +183,9 @@ void Sabertooth_SetM1(int percent)
     // Send Plain Text Serial command
     char cmd[16];
     snprintf(cmd, sizeof(cmd), "M1: %d\r\n", scaled_speed);
-    printf("[M1] Speed: %d%% (scaled: %d)\r\n", percent, scaled_speed);
+    if (SABERTOOTH_VERBOSE_COMMAND_PRINTS) {
+        printf("[M1] Speed: %d%% (scaled: %d)\r\n", percent, scaled_speed);
+    }
     sabertooth_send_command(cmd);
 }
 
@@ -204,7 +206,9 @@ void Sabertooth_SetM2(int percent)
     // Send Plain Text Serial command
     char cmd[16];
     snprintf(cmd, sizeof(cmd), "M2: %d\r\n", scaled_speed);
-    printf("[M2] Speed: %d%% (scaled: %d)\r\n", percent, scaled_speed);
+    if (SABERTOOTH_VERBOSE_COMMAND_PRINTS) {
+        printf("[M2] Speed: %d%% (scaled: %d)\r\n", percent, scaled_speed);
+    }
     sabertooth_send_command(cmd);
 }
 
@@ -292,7 +296,7 @@ void Sabertooth_PollFeedback(void)
         SystemHealth_SetSensorStatus(SENSOR_SABERTOOTH, SENSOR_OK);
     }
     
-    if ((now_ms - last_query_ms) >= 100) {  // Query every 100ms
+    if ((now_ms - last_query_ms) >= 250) {  // Query every 250ms
         last_query_ms = now_ms;
         
         switch (s_query_state) {
