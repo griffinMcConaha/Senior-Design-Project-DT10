@@ -1,5 +1,6 @@
 #include "robot_sm.h"
 #include "robot_actions.h"
+#include "system_health.h"
 #include "mission.h"
 #include "stdio.h"
 
@@ -266,6 +267,21 @@ void RobotSM_HandleTransitions(RobotSM_t *sm)
     RobotState_t from = sm->current;
     RobotState_t to = sm->requested;
 
+    // ESTOP recovery path: allow operator-requested recovery states after
+    // health-layer reset succeeds. This keeps ESTOP fail-safe while avoiding
+    // command dead-ends in field operation.
+    if (from == STATE_ESTOP && sm->estop_latched &&
+        (to == STATE_PAUSE || to == STATE_MANUAL || to == STATE_AUTO))
+    {
+        if (!SystemHealth_ResetEmergencyStop()) {
+            printf("[SM] SAFETY: ESTOP health reset rejected\r\n");
+            return;
+        }
+        sm->estop_latched = false;
+        printf("[SM] ESTOP latch cleared - robot ready for commands\r\n");
+        Emergency_Stop_ResetOnce();
+    }
+
     // SAFETY RULE 1: ESTOP latches - can only exit via explicit reset through PAUSE
     if (sm->estop_latched && to != STATE_PAUSE)
     {
@@ -273,9 +289,9 @@ void RobotSM_HandleTransitions(RobotSM_t *sm)
         return;
     }
 
-    // SAFETY RULE 2: Cannot transition directly from ESTOP/ERROR to MANUAL/AUTO
-    // Must go through PAUSE intermediate state
-    if ((from == STATE_ESTOP || from == STATE_ERROR) &&
+    // SAFETY RULE 2: Cannot transition directly from ERROR to MANUAL/AUTO
+    // Must go through PAUSE intermediate state.
+    if ((from == STATE_ERROR) &&
         (to == STATE_MANUAL || to == STATE_AUTO))
     {
         printf("[SM] SAFETY: Cannot go directly from %s to %s (must use PAUSE as intermediate)\r\n",
@@ -292,8 +308,7 @@ void RobotSM_HandleTransitions(RobotSM_t *sm)
     // SAFETY RULE 4: Exiting ESTOP through PAUSE clears latch
     if (from == STATE_ESTOP && to == STATE_PAUSE)
     {
-        sm->estop_latched = false;
-        printf("[SM] ESTOP latch cleared - robot ready for commands\r\n");
+        // Latch/health reset are handled above for all allowed ESTOP exits.
     }
 
     // All validations passed - perform transition

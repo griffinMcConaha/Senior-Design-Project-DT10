@@ -355,8 +355,8 @@ void Diag_TestMotorFeedback(uint16_t duration_ms)
             int m1_temp = Sabertooth_GetTemperature(1);
             int m2_temp = Sabertooth_GetTemperature(2);
 
-            printf("%7u | %10.1f | %10.1f | %10.1f | %10d | %10d\r\n",
-                   elapsed, battery, m1_current, m2_current, m1_temp, m2_temp);
+                 printf("%7lu | %10.1f | %10.1f | %10.1f | %10d | %10d\r\n",
+                     (unsigned long)elapsed, battery, m1_current, m2_current, m1_temp, m2_temp);
 
             feedback_count++;
         }
@@ -378,7 +378,8 @@ void Diag_TestMotorFeedback(uint16_t duration_ms)
     }
 
     printf("\r\n" ANSI_YELLOW "[DIAG] ========== FEEDBACK MONITOR COMPLETE ==========\r\n" ANSI_RESET);
-    printf(ANSI_GREEN "[DIAG] Total samples collected: %u\r\n\r\n" ANSI_RESET, feedback_count);
+        printf(ANSI_GREEN "[DIAG] Total samples collected: %lu\r\n\r\n" ANSI_RESET,
+            (unsigned long)feedback_count);
     Console_ShowTestMenu();
 }
 

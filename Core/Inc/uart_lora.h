@@ -24,6 +24,10 @@ void LoRA_Init(UART_HandleTypeDef *huart5);
 // Process incoming byte from UART 5 RX (call from ISR)
 void LoRA_RxByte(uint8_t byte);
 
+// Drain queued UART5 bytes and run parser in main-loop context.
+// max_bytes=0 processes all currently queued bytes.
+void LoRA_ProcessRxQueue(uint16_t max_bytes);
+
 // Periodic update (call from main loop)
 void LoRA_Tick(uint32_t now_ms);
 
@@ -51,6 +55,13 @@ void LoRA_SendTelemetry(uint8_t state, float gps_lat, float gps_lon, uint8_t gps
                         int motor_m1, int motor_m2, float yaw_deg, float pitch_deg,
                         uint8_t salt_rate, uint8_t brine_rate, float temp_c,
                         uint16_t prox_left_cm, uint16_t prox_right_cm);
+
+// Send compact manual-drive telemetry (call at ~200ms during STATE_MANUAL).
+// Sends only the fields needed for joystick feedback: motor speeds, proximity,
+// heading, and state — keeping air-time short so updates reach the app fast.
+void LoRA_SendManualTelemetry(int motor_m1, int motor_m2,
+                               float yaw_deg,
+                               uint16_t prox_left_cm, uint16_t prox_right_cm);
 
 // Send fault information to base station
 // fault_code: fault code number (0-8)
@@ -91,6 +102,11 @@ uint32_t LoRA_GetLastTxMs(void);
 uint32_t LoRA_GetLastRxMs(void);
 uint32_t LoRA_GetTxCount(void);
 uint32_t LoRA_GetRxCount(void);
+uint32_t LoRA_GetInvalidCommandCount(void);
+uint32_t LoRA_GetStartFilterDropCount(void);
+uint32_t LoRA_GetPrefixRejectCount(void);
+uint32_t LoRA_GetRxOverflowCount(void);
+uint32_t LoRA_GetIsrQueueOverflowCount(void);
 
 #ifdef __cplusplus
 }

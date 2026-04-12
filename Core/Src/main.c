@@ -88,6 +88,9 @@ HeadingFusion_t g_hf = {0};
 #define ANSI_MAGENTA "\033[35m"
 #define ANSI_RESET   "\033[0m"
 
+// High-rate UART console logs can interfere with interactive typing on USART2.
+#define MAIN_VERBOSE_TELEMETRY_LOGS 0
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -118,6 +121,36 @@ volatile uint8_t g_test_mode = 0;         // 1 = stay in test mode until reset
 static uint8_t s_disp_uart4_rx_byte = 0;
 static uint8_t s_lora_uart5_rx_byte = 0;
 
+static void PrintResetCause(void)
+{
+  uint8_t pin_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST) != RESET) ? 1u : 0u;
+  uint8_t por_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) != RESET) ? 1u : 0u;
+  uint8_t sw_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) != RESET) ? 1u : 0u;
+  uint8_t iwdg_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDGRST) != RESET) ? 1u : 0u;
+  uint8_t wwdg_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDGRST) != RESET) ? 1u : 0u;
+  uint8_t lowpwr_reset = (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWRRST) != RESET) ? 1u : 0u;
+
+  printf("[BOOT] Reset flags: PIN=%u POR=%u SW=%u IWDG=%u WWDG=%u LPWR=%u\r\n",
+         pin_reset,
+         por_reset,
+         sw_reset,
+         iwdg_reset,
+         wwdg_reset,
+         lowpwr_reset);
+
+  if (pin_reset) {
+    printf(ANSI_YELLOW "[BOOT] Reset cause includes NRST pin event (reset button/external reset)\r\n" ANSI_RESET);
+  }
+  if (iwdg_reset || wwdg_reset) {
+    printf(ANSI_YELLOW "[BOOT] Reset cause includes watchdog reset\r\n" ANSI_RESET);
+  }
+  if (sw_reset) {
+    printf("[BOOT] Reset cause includes software reset\r\n");
+  }
+
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+}
+
 static int clamp_manual_output(int value, int min_value, int max_value)
 {
   if (value < min_value) return min_value;
@@ -134,6 +167,50 @@ static int step_toward_manual_output(int current_value, int target_value, int ma
 
 static int s_manual_drive_filtered_pct = 0;
 static int s_manual_turn_filtered_pct = 0;
+static uint32_t s_console_uart2_error_resets = 0;
+
+static uint8_t PollConsoleUart2(RobotSM_t *sm, uint8_t boot_window)
+{
+  uint8_t test_menu_requested = 0;
+
+  // Recover from UART line errors that can stall RX handling until SR/DR are drained.
+  if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_ORE) ||
+      __HAL_UART_GET_FLAG(&huart2, UART_FLAG_FE)  ||
+      __HAL_UART_GET_FLAG(&huart2, UART_FLAG_NE)  ||
+      __HAL_UART_GET_FLAG(&huart2, UART_FLAG_PE)) {
+    volatile uint32_t sr = huart2.Instance->SR;
+    volatile uint32_t dr = huart2.Instance->DR;
+    (void)sr;
+    (void)dr;
+    s_console_uart2_error_resets++;
+
+    if ((s_console_uart2_error_resets % 200u) == 1u) {
+      printf("[CONSOLE] USART2 RX recovered from line error (count=%lu)\r\n",
+             (unsigned long)s_console_uart2_error_resets);
+    }
+  }
+
+  // Drain all pending bytes so bursts from terminal do not overrun polling cadence.
+  while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
+    uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+
+    if (boot_window && (ch == 'S' || ch == 's')) {
+      Dispersion_BypassStartupCheck();
+      printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
+      continue;
+    }
+
+    if (boot_window && (ch == 'T' || ch == 't')) {
+      Console_ProcessCommand("T", sm);
+      test_menu_requested = 1;
+      continue;
+    }
+
+    Console_RxByte(ch, sm);
+  }
+
+  return test_menu_requested;
+}
 
 static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
 {
@@ -342,7 +419,29 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
     uint32_t err = HAL_UART_GetError(huart);
 
-    if (huart->Instance == UART4) {
+    if (huart->Instance == USART2) {
+      if (err != HAL_UART_ERROR_NONE) {
+        s_console_uart2_error_resets++;
+        printf("[USART2] ERROR: 0x%08lX, recovered (count=%lu)\r\n",
+               err,
+               (unsigned long)s_console_uart2_error_resets);
+      }
+      volatile uint32_t sr = huart2.Instance->SR;
+      volatile uint32_t dr = huart2.Instance->DR;
+      (void)sr;
+      (void)dr;
+      __HAL_UART_CLEAR_OREFLAG(&huart2);
+    } else if (huart->Instance == USART3) {
+      if (err != HAL_UART_ERROR_NONE) {
+        printf("[USART3] ERROR: 0x%08lX, rearming GPS RX\r\n", err);
+      }
+      volatile uint32_t sr = huart3.Instance->SR;
+      volatile uint32_t dr = huart3.Instance->DR;
+      (void)sr;
+      (void)dr;
+      __HAL_UART_CLEAR_OREFLAG(&huart3);
+      GPS_CheckAndRecover();
+    } else if (huart->Instance == UART4) {
       if (err != HAL_UART_ERROR_NONE) {
         printf("[UART4] ERROR: 0x%08lX, rearming RX\r\n", err);
       }
@@ -374,6 +473,8 @@ void UART_Flush_All(void)
     HAL_UART_DeInit(&huart1); HAL_UART_Init(&huart1);
     HAL_UART_DeInit(&huart2); HAL_UART_Init(&huart2);
     HAL_UART_DeInit(&huart3); HAL_UART_Init(&huart3);
+    HAL_NVIC_DisableIRQ(USART2_IRQn);
+    __HAL_UART_CLEAR_OREFLAG(&huart2);
 
     GPS_Init(&huart3);
 }
@@ -425,6 +526,11 @@ int main(void)
   ConsoleIO_t console = {0};
   Console_Init(&console, &huart2, &huart3, &huart1);
   Console_SetTestModeFlag(&g_test_mode);
+  PrintResetCause();
+  // Console RX is polled in main loop; keep USART2 IRQ disabled to avoid
+  // interrupt-side handling fighting with the polled console path.
+  HAL_NVIC_DisableIRQ(USART2_IRQn);
+  __HAL_UART_CLEAR_OREFLAG(&huart2);
   
   // UART_Flush_All(); // Commented out - was causing double initialization
   HAL_Delay(500);  // Wait for all hardware to stabilize
@@ -472,7 +578,20 @@ int main(void)
   HAL_Delay(100);
 
   imu_last_update_ms = HAL_GetTick();
-  imu_ok = 1;
+  // Check if IMU initialization actually succeeded; retry once if it failed.
+  // The probe can miss the device on first attempt if the I2C bus was left in
+  // a bad state by the scan above - a single retry with a clean bus is enough.
+  imu_ok = IMU_GetInitStatus();
+  if (!imu_ok) {
+      printf(ANSI_YELLOW "WARNING: IMU initialization failed on boot - retrying in 300 ms\r\n" ANSI_RESET);
+      IWDG->KR = 0xAAAA;
+      HAL_Delay(300);
+      IMU_Init(&hi2c1);
+      imu_ok = IMU_GetInitStatus();
+      if (!imu_ok) {
+          printf(ANSI_YELLOW "WARNING: IMU retry also failed - will attempt recovery in main loop\r\n" ANSI_RESET);
+      }
+  }
 
   printf(ANSI_GREEN "========== ROBOTIC ANTI-ICING SYSTEM BOOTING ==========\r\n" ANSI_RESET);
   
@@ -515,19 +634,8 @@ int main(void)
       // Refresh hardware watchdog during boot wait
       IWDG->KR = 0xAAAA;
 
-      if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
-        uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-        if (ch == 'S' || ch == 's') {
-          Dispersion_BypassStartupCheck();
-          printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
-          continue;
-        }
-        if (ch == 'T' || ch == 't') {
-          Console_RxByte(ch, &g_sm);
-          Console_RxByte('\r', &g_sm);
-          break; // interrupt wait and enter test menu
-        }
-        Console_RxByte(ch, &g_sm);
+      if (PollConsoleUart2(&g_sm, 1)) {
+        break; // interrupt wait and enter test menu
       }
       HAL_Delay(1);
     }
@@ -539,8 +647,11 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   uint32_t last_50hz_ms = HAL_GetTick();
   uint32_t last_1hz_ms = HAL_GetTick();
+  uint32_t last_1hz_status_ms = HAL_GetTick();
   uint32_t last_lora_tx_ms = HAL_GetTick();
-  const uint32_t lora_tx_interval_ms = 3000;
+  uint32_t last_manual_lora_tx_ms = HAL_GetTick();
+  const uint32_t lora_tx_interval_ms = 300;
+  const uint32_t lora_manual_tx_interval_ms = 80;  // ~12.5 Hz during manual drive
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
     uint8_t startup_mode_sent = 0;
     uint8_t last_test_mode_seen = g_test_mode;
@@ -560,20 +671,15 @@ int main(void)
       // Refresh hardware watchdog to prevent reset
       IWDG->KR = 0xAAAA;  // Refresh (reload counter)
       
-        // Poll USART2 for console input (non-interrupt, low-latency control)
-      if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
-          uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
-          if (ch == 'S' || ch == 's') {
-            Dispersion_BypassStartupCheck();
-            printf("[DISP] Startup check bypass requested by console key '%c'\r\n", ch);
-            continue;
-          }
-          Console_RxByte(ch, &g_sm);
-      }
+      // Poll USART2 for console input (non-interrupt, low-latency control)
+      (void)PollConsoleUart2(&g_sm, 0);
       
 	  uint32_t now_ms = HAL_GetTick();
 	  GPS_Tick(now_ms);
 	  const GPS_Data_t *gps = GPS_Get();
+
+      // Keep LoRa draining steady while prioritizing interactive console latency.
+      LoRA_ProcessRxQueue(96);
 
       if (startup_mode_sent && g_test_mode && !last_test_mode_seen) {
           Dispersion_BypassStartupCheck();
@@ -584,6 +690,23 @@ int main(void)
       // Test mode bypasses autonomous/manual control actions, but still emits a
       // lightweight LoRa heartbeat so the rest of the stack can tell the STM is alive.
       if (g_test_mode) {
+        // If a remote control command arrives while test mode is latched,
+        // exit test mode so field-control is not silently blocked.
+        uint8_t lora_test_state = 0;
+        LoRA_ManualCommand_t lora_test_manual_cmd = LORA_MANUAL_CMD_NONE;
+        if (LoRA_GetPendingCommand(&lora_test_state)) {
+          g_test_mode = 0;
+          RobotSM_Request(&g_sm, (RobotState_t)lora_test_state);
+          printf("[MODE] Exiting test mode via LoRa state command (%u)\r\n", lora_test_state);
+          continue;
+        }
+        if (LoRA_GetPendingManualCommand(&lora_test_manual_cmd)) {
+          g_test_mode = 0;
+          printf("[MODE] Exiting test mode via LoRa manual command\r\n");
+          HandleLoRaManualCommand(lora_test_manual_cmd);
+          continue;
+        }
+
         LoRA_Tick(now_ms);
         if ((now_ms - last_lora_tx_ms) >= lora_tx_interval_ms) {
           last_lora_tx_ms = now_ms;
@@ -598,27 +721,30 @@ int main(void)
       // Poll Sabertooth feedback (battery voltage, motor current, temperature)
       Sabertooth_PollFeedback();
 
-      if ((now_ms - last_50hz_ms) >= 20)
+        if ((now_ms - last_50hz_ms) >= 20)
       {
           last_50hz_ms += 20;
 
           static IMU_Status_t imu_last;
+          static uint32_t imu_consecutive_failures = 0;
           IMU_Status_t imu = IMU_Read();
           imu_last = imu;
 
-          if (!imu.ok)
+          if (imu.ok)
           {
-              imu_ok = 0;
+            imu_consecutive_failures = 0;
+            imu_ok = 1;
+		  /* Use fixed 50 Hz timestep (20 ms) for consistency */
+		  float dt = 0.02f;
+		  imu_last_update_ms = now_ms;
+
+		  HeadingFusion_Update(&g_hf, &imu, gps, dt);
+
           }
           else
           {
-        	  imu_ok = 1;
-        	  /* Use fixed 50 Hz timestep (20 ms) for consistency */
-        	  float dt = 0.02f;
-        	  imu_last_update_ms = now_ms;
-
-        	  HeadingFusion_Update(&g_hf, &imu, gps, dt);
-
+            imu_consecutive_failures++;
+            imu_ok = ((imu_consecutive_failures < 10u) || ((now_ms - imu_last_update_ms) <= 2000u)) ? 1u : 0u;
           }
 
           SystemHealthInputs_t sh = {
@@ -642,9 +768,55 @@ int main(void)
                  // LEDs
                  SystemHealth_UpdateLeds(RobotSM_Current(&g_sm), imu_ok, gps->has_fix);
 
-          // Check for incoming LoRA commands and forward to state machine
-          uint8_t lora_handled = 0;
-          uint8_t lora_cmd = 0;
+          // ===== Fast LoRa telemetry during manual drive (200 ms = 5 Hz) =====
+          // Sends a compact packet so LoRa air-time stays short while the app
+          // still gets responsive motor/proximity/heading feedback.
+          if (RobotSM_Current(&g_sm) == STATE_MANUAL &&
+              (now_ms - last_manual_lora_tx_ms) >= lora_manual_tx_interval_ms)
+          {
+              last_manual_lora_tx_ms = now_ms;
+              LoRA_SendManualTelemetry(
+                  Sabertooth_GetM1(), Sabertooth_GetM2(),
+                  g_hf.yaw_deg,
+                  Proximity_ReadLeft(), Proximity_ReadRight());
+          }
+
+            // ===== 1Hz Periodic Health Checks and Recovery =====
+              if ((now_ms - last_1hz_ms) >= 1000) {
+                static uint32_t next_imu_recovery_ms = 0;
+                static uint32_t next_gps_recovery_ms = 0;
+              last_1hz_ms += 1000;
+
+                if (GPS_IsHealthy()) {
+                  next_gps_recovery_ms = now_ms;
+                }
+
+              if (!GPS_IsHealthy() && now_ms >= next_gps_recovery_ms) {
+                  printf("[GPS] WARNING: Receiver not responding - rx_bytes=%lu - attempting recovery\r\n",
+                         (unsigned long)GPS_GetRxByteCount());
+                  GPS_CheckAndRecover();
+                next_gps_recovery_ms = now_ms + 10000u;
+              }
+
+                if (imu_consecutive_failures >= 10u
+                  && (now_ms - imu_last_update_ms) > 2000u
+                  && now_ms >= next_imu_recovery_ms) {
+                  printf("[IMU] WARNING: No successful samples for %lu ms - attempting recovery\r\n",
+                         (unsigned long)(now_ms - imu_last_update_ms));
+                  IMU_CheckAndRecover();
+                  imu_ok = IMU_GetInitStatus();
+                  if (imu_ok) {
+                      imu_last_update_ms = now_ms;
+                    next_imu_recovery_ms = now_ms + 2000u;
+                  } else {
+                    next_imu_recovery_ms = now_ms + 10000u;
+                  }
+              }
+          }
+
+            // Check for incoming LoRA commands and forward to state machine
+            uint8_t lora_handled = 0;
+            uint8_t lora_cmd = 0;
           if (LoRA_GetPendingCommand(&lora_cmd)) {
               RobotSM_Request(&g_sm, (RobotState_t)lora_cmd);
               const char *lora_raw = LoRA_GetLastCommand();
@@ -710,9 +882,9 @@ int main(void)
           LoRA_Tick(now_ms);
 
             // ---- 1 Hz status/readout prints (SKIP during test mode) ----
-            if ((now_ms - last_1hz_ms) >= 1000 && !g_test_mode)
+            if ((now_ms - last_1hz_status_ms) >= 1000 && !g_test_mode)
           {
-              last_1hz_ms += 1000;
+              last_1hz_status_ms += 1000;
               
               // Print sensor status (IMU, GPS, fusion)
               Console_PrintStatus(NULL, &imu_last, gps, &g_hf);
@@ -750,7 +922,7 @@ int main(void)
                                      prox_left_cm, prox_right_cm);
 
                   const char *lora_tx_payload = LoRA_GetLastTxPayload();
-                  if (lora_tx_payload && lora_tx_payload[0] != '\0') {
+                  if (MAIN_VERBOSE_TELEMETRY_LOGS && lora_tx_payload && lora_tx_payload[0] != '\0') {
                     printf(ANSI_YELLOW "[MAIN] LoRa TX: " ANSI_RESET "%s", lora_tx_payload);
                   }
               }
@@ -768,17 +940,19 @@ int main(void)
               else
                   snprintf(prox_right_str, sizeof(prox_right_str), "%u cm", prox_right_cm);
               
-              printf(ANSI_YELLOW "[MAIN] TELEM: mode=%u, GPS=%.4f,%.4f (fix:%u, sats:%u, hdop:%.1f), "
-                     ANSI_CYAN "M1=%d, M2=%d, " ANSI_GREEN "Heading=%.1f deg, Pitch=%.1f deg, "
-                     ANSI_MAGENTA "Salt=%u%%, Brine=%u%%, Temp=%.1f C, "
-                     ANSI_RESET "Prox L=%s, R=%s\r\n",
-                     RobotSM_Current(&g_sm),
-                     gps->latitude_deg, gps->longitude_deg, gps->has_fix,
-                     gps_num_sat, gps_hdop,
-                     m1_speed, m2_speed,
-                     g_hf.yaw_deg, g_hf.pitch_deg,
-                     salt_rate, brine_rate, imu_temp,
-                     prox_left_str, prox_right_str);
+              if (MAIN_VERBOSE_TELEMETRY_LOGS) {
+                  printf(ANSI_YELLOW "[MAIN] TELEM: mode=%u, GPS=%.4f,%.4f (fix:%u, sats:%u, hdop:%.1f), "
+                    ANSI_CYAN "M1=%d, M2=%d, " ANSI_GREEN "Heading=%.1f deg, Pitch=%.1f deg, "
+                    ANSI_MAGENTA "Salt=%u%%, Brine=%u%%, Temp=%.1f C, "
+                    ANSI_RESET "Prox L=%s, R=%s\r\n",
+                    RobotSM_Current(&g_sm),
+                    gps->latitude_deg, gps->longitude_deg, gps->has_fix,
+                    gps_num_sat, gps_hdop,
+                    m1_speed, m2_speed,
+                    g_hf.yaw_deg, g_hf.pitch_deg,
+                    salt_rate, brine_rate, imu_temp,
+                    prox_left_str, prox_right_str);
+              }
 
           }
       }  /* Close the 50 Hz if block */

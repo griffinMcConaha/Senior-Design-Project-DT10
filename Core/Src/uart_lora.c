@@ -17,8 +17,13 @@
 #define LORA_RX_BUFFER_SIZE 256
 #define LORA_COMMAND_TIMEOUT_MS 5000
 #define LORA_STREAM_BUFFER_SIZE 512
+#define LORA_ISR_QUEUE_SIZE 512
 #define LORA_TX_DIAGNOSTICS_ENABLED 1
 #define LORA_UART_TX_TIMEOUT_MS 250
+#define LORA_TX_FAIL_TIMEOUT_STREAK 5u
+#define LORA_HEALTH_INACTIVE_MS 45000u
+#define LORA_HEALTH_STALE_TICKS_TO_TIMEOUT 5u
+#define LORA_HEALTH_FRESH_TICKS_TO_RECOVER 2u
 
 typedef struct {
     UART_HandleTypeDef *huart;
@@ -40,16 +45,98 @@ typedef struct {
     int8_t manual_drive_pct;
     int8_t manual_turn_pct;
     uint8_t command_valid;
+    uint32_t invalid_command_count;
+    uint32_t start_filter_drop_count;
+    uint32_t prefix_reject_count;
+    uint32_t rx_overflow_count;
     uint8_t stream_seq_init;
     uint32_t stream_expected_seq;
     uint32_t stream_gap_count;
     char stream_buffer[LORA_STREAM_BUFFER_SIZE];
     uint16_t stream_len;
     uint8_t drop_until_eol;
+    volatile uint16_t isr_q_head;
+    volatile uint16_t isr_q_tail;
+    uint8_t isr_q[LORA_ISR_QUEUE_SIZE];
+    uint32_t isr_q_overflow_count;
+    uint8_t tx_fail_streak;
+    uint8_t health_stale_ticks;
+    uint8_t health_fresh_ticks;
 } LoRA_State_t;
 
 static LoRA_State_t lora_state = {0};
 static uint8_t s_lora_verbose = 0;
+
+static uint8_t lora_isr_queue_push(uint8_t byte)
+{
+    uint16_t head = lora_state.isr_q_head;
+    uint16_t next = (uint16_t)((head + 1u) % LORA_ISR_QUEUE_SIZE);
+    if (next == lora_state.isr_q_tail) {
+        lora_state.isr_q_overflow_count++;
+        return 0;
+    }
+
+    lora_state.isr_q[head] = byte;
+    lora_state.isr_q_head = next;
+    return 1;
+}
+
+static uint8_t lora_isr_queue_pop(uint8_t *out_byte)
+{
+    if (!out_byte) return 0;
+
+    uint16_t tail = lora_state.isr_q_tail;
+    if (tail == lora_state.isr_q_head) {
+        return 0;
+    }
+
+    *out_byte = lora_state.isr_q[tail];
+    lora_state.isr_q_tail = (uint16_t)((tail + 1u) % LORA_ISR_QUEUE_SIZE);
+    return 1;
+}
+
+static uint8_t lora_is_valid_start_byte(uint8_t byte, uint8_t upper)
+{
+    // Accept common command starts used by server/app/base-station payloads.
+    // This keeps DRIVE/JOY/FORWARD style manual commands from being dropped.
+    return (uint8_t)(byte == '{' ||
+                     upper == 'C' || upper == 'S' || upper == 'A' || upper == 'M' ||
+                     upper == 'P' || upper == 'E' || upper == 'W' || upper == 'D' ||
+                     upper == 'F' || upper == 'B' || upper == 'L' || upper == 'R' ||
+                     upper == 'J' || upper == 'T');
+}
+
+static uint8_t lora_cmd_prefix_rejects_byte(uint16_t rx_index, uint8_t first_char, uint8_t upper_byte, uint8_t byte)
+{
+    if ((uint8_t)toupper((unsigned char)first_char) != 'C') {
+        return 0;
+    }
+
+    if (rx_index == 1) {
+        return (uint8_t)(upper_byte != 'M');
+    }
+    if (rx_index == 2) {
+        return (uint8_t)(upper_byte != 'D');
+    }
+    if (rx_index == 3) {
+        return (uint8_t)(byte != ':');
+    }
+
+    return 0;
+}
+
+static const char* lora_state_name(uint8_t state)
+{
+    switch (state)
+    {
+        case 0: return "MANUAL";
+        case 1: return "AUTO";
+        case 2: return "PAUSE";
+        case 3: return "ERROR";
+        case 4: return "ESTOP";
+        default: return "UNKNOWN";
+    }
+}
 
 static int8_t lora_clamp_percent(int value)
 {
@@ -218,6 +305,24 @@ static uint8_t lora_parse_manual_request(const char *cmd, LoRA_ManualCommand_t *
 
     // Basic JSON compatibility for upcoming app payloads
     if (payload[0] == '{') {
+        int8_t drive_pct = 0;
+        int8_t turn_pct = 0;
+        uint8_t have_drive = lora_parse_percent_field(payload, "\"THROTTLE\"", &drive_pct)
+            || lora_parse_percent_field(payload, "\"DRIVE\"", &drive_pct)
+            || lora_parse_percent_field(payload, "THROTTLE", &drive_pct)
+            || lora_parse_percent_field(payload, "DRIVE", &drive_pct);
+        uint8_t have_turn = lora_parse_percent_field(payload, "\"TURN\"", &turn_pct)
+            || lora_parse_percent_field(payload, "\"STEER\"", &turn_pct)
+            || lora_parse_percent_field(payload, "TURN", &turn_pct)
+            || lora_parse_percent_field(payload, "STEER", &turn_pct);
+
+        if (have_drive || have_turn) {
+            lora_state.manual_drive_pct = drive_pct;
+            lora_state.manual_turn_pct = turn_pct;
+            *out_cmd = LORA_MANUAL_CMD_DRIVE;
+            return 1;
+        }
+
         if (strstr(payload, "FORWARD") != NULL) {
             *out_cmd = LORA_MANUAL_CMD_FORWARD;
             return 1;
@@ -255,7 +360,9 @@ static void lora_uart5_send(const char *msg, const char *tag)
         LORA_UART_TX_TIMEOUT_MS);
 
     if (tx_status != HAL_OK) {
-        SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
+        if (lora_state.tx_fail_streak < 255u) {
+            lora_state.tx_fail_streak++;
+        }
         if (s_lora_verbose) {
             printf("[LORA] TX failed for %s (status=%d)\r\n", tag ? tag : "payload", (int)tx_status);
         }
@@ -266,6 +373,7 @@ static void lora_uart5_send(const char *msg, const char *tag)
     lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
     lora_state.last_tx_ms = HAL_GetTick();
     lora_state.tx_count++;
+    lora_state.tx_fail_streak = 0;
     if (s_lora_verbose) {
         printf("[LORA] Sent %s: %s", tag ? tag : "", msg);
     }
@@ -322,27 +430,39 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.manual_command_valid = 0;
     lora_state.manual_drive_pct = 0;
     lora_state.manual_turn_pct = 0;
+    lora_state.invalid_command_count = 0;
+    lora_state.start_filter_drop_count = 0;
+    lora_state.prefix_reject_count = 0;
+    lora_state.rx_overflow_count = 0;
     lora_state.stream_seq_init = 0;
     lora_state.stream_expected_seq = 0;
     lora_state.stream_gap_count = 0;
     lora_state.stream_len = 0;
     lora_state.drop_until_eol = 0;
+    lora_state.isr_q_head = 0;
+    lora_state.isr_q_tail = 0;
+    lora_state.isr_q_overflow_count = 0;
+    lora_state.tx_fail_streak = 0;
     memset(lora_state.rx_buffer, 0, LORA_RX_BUFFER_SIZE);
     memset(lora_state.raw_buffer, 0, LORA_RX_BUFFER_SIZE);
     memset(lora_state.last_raw_frame, 0, sizeof(lora_state.last_raw_frame));
     memset(lora_state.last_command, 0, sizeof(lora_state.last_command));
     memset(lora_state.last_tx_payload, 0, sizeof(lora_state.last_tx_payload));
     memset(lora_state.stream_buffer, 0, sizeof(lora_state.stream_buffer));
+    memset(lora_state.isr_q, 0, sizeof(lora_state.isr_q));
 
     if (s_lora_verbose) {
         printf("[LORA] LoRA module initialized on UART5 (115200 baud)\r\n");
     }
 }
 
-// Process incoming byte from UART 5 RX (call from ISR)
-void LoRA_RxByte(uint8_t byte)
+// Parse one UART5 byte in main-loop context.
+static void lora_process_rx_byte(uint8_t byte)
 {
     if (!lora_state.huart) return;
+
+    const uint8_t upper = (uint8_t)toupper((unsigned char)byte);
+    lora_state.last_rx_ms = HAL_GetTick();
 
     // Check for line ending (CR or LF)
     if (byte == '\r' || byte == '\n')
@@ -507,6 +627,7 @@ void LoRA_RxByte(uint8_t byte)
             }
             else
             {
+                lora_state.invalid_command_count++;
                 if (s_lora_verbose) {
                     printf("[LORA] Invalid command: %s\r\n", cmd);
                 }
@@ -534,30 +655,17 @@ void LoRA_RxByte(uint8_t byte)
         return;
     }
 
-    // Accept control frames that start with CMD:/stream wrappers or bare state words
+    // Accept control frames case-insensitively; also allow JSON payload starts.
     if (lora_state.rx_index == 0) {
-        if (byte != 'C' && byte != 'S' && byte != 'A' && byte != 'M' && byte != 'P' && byte != 'E' && byte != 'W' &&
-            byte != 'a' && byte != 'm' && byte != 'p' && byte != 'e' && byte != 'w') {
+        if (!lora_is_valid_start_byte(byte, upper)) {
+            lora_state.start_filter_drop_count++;
             lora_state.drop_until_eol = 1;
             return;
         }
-    } else if (lora_state.rx_buffer[0] == 'C') {
-        if (lora_state.rx_index == 1) {
-            if (byte != 'M') {
-                lora_state.rx_index = 0;
-                return;
-            }
-        } else if (lora_state.rx_index == 2) {
-            if (byte != 'D') {
-                lora_state.rx_index = 0;
-                return;
-            }
-        } else if (lora_state.rx_index == 3) {
-            if (byte != ':') {
-                lora_state.rx_index = 0;
-                return;
-            }
-        }
+    } else if (lora_cmd_prefix_rejects_byte(lora_state.rx_index, lora_state.rx_buffer[0], upper, byte)) {
+        lora_state.prefix_reject_count++;
+        lora_state.rx_index = 0;
+        return;
     }
 
     // Add byte to buffer
@@ -567,11 +675,37 @@ void LoRA_RxByte(uint8_t byte)
     }
     else
     {
+        lora_state.rx_overflow_count++;
         // Buffer overflow - reset
         if (s_lora_verbose) {
             printf("[LORA] RX buffer overflow, resetting\r\n");
         }
         lora_state.rx_index = 0;
+    }
+}
+
+// ISR entrypoint: enqueue bytes only.
+void LoRA_RxByte(uint8_t byte)
+{
+    if (!lora_state.huart) return;
+
+    if (!lora_isr_queue_push(byte) && s_lora_verbose) {
+        printf("[LORA] ISR queue overflow (count=%lu)\r\n",
+               (unsigned long)lora_state.isr_q_overflow_count);
+    }
+}
+
+void LoRA_ProcessRxQueue(uint16_t max_bytes)
+{
+    uint16_t processed = 0;
+    uint8_t byte = 0;
+
+    while (lora_isr_queue_pop(&byte)) {
+        lora_process_rx_byte(byte);
+        processed++;
+        if (max_bytes != 0 && processed >= max_bytes) {
+            break;
+        }
     }
 }
 
@@ -597,12 +731,29 @@ void LoRA_Tick(uint32_t now_ms)
         last_activity_ms = lora_state.last_rx_ms;
     }
 
+    uint8_t inactive = 0;
     if (last_activity_ms == 0) {
-        SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
-    } else if ((now_ms - last_activity_ms) > 10000) {
-        SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
+        inactive = 1;
+    } else if ((now_ms - last_activity_ms) > LORA_HEALTH_INACTIVE_MS) {
+        inactive = 1;
+    }
+
+    if (inactive) {
+        if (lora_state.health_stale_ticks < 255u) {
+            lora_state.health_stale_ticks++;
+        }
+        lora_state.health_fresh_ticks = 0;
+        if (lora_state.health_stale_ticks >= LORA_HEALTH_STALE_TICKS_TO_TIMEOUT) {
+            SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
+        }
     } else {
-        SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_OK);
+        if (lora_state.health_fresh_ticks < 255u) {
+            lora_state.health_fresh_ticks++;
+        }
+        lora_state.health_stale_ticks = 0;
+        if (lora_state.health_fresh_ticks >= LORA_HEALTH_FRESH_TICKS_TO_RECOVER) {
+            SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_OK);
+        }
     }
 }
 
@@ -612,23 +763,33 @@ void LoRA_SendState(uint8_t state, float gps_lat, float gps_lon,
 {
     if (!lora_state.huart) return;
 
-    char state_name[16] = "UNKNOWN";
-    switch (state)
-    {
-        case 0: strcpy(state_name, "MANUAL"); break;
-        case 1: strcpy(state_name, "AUTO"); break;
-        case 2: strcpy(state_name, "PAUSE"); break;
-        case 3: strcpy(state_name, "ERROR"); break;
-        case 4: strcpy(state_name, "ESTOP"); break;
-    }
-
     // JSON format: {"state":"MODE","gps":{"lat":0.0,"lon":0.0},"motor":{"m1":0,"m2":0}}
     char msg[160];
     snprintf(msg, sizeof(msg),
              "{\"state\":\"%s\",\"gps\":{\"lat\":%.4f,\"lon\":%.4f},\"motor\":{\"m1\":%d,\"m2\":%d}}\r\n",
-             state_name, gps_lat, gps_lon, motor_m1, motor_m2);
+             lora_state_name(state), gps_lat, gps_lon, motor_m1, motor_m2);
 
     lora_uart5_send(msg, "state");
+}
+
+// Send comprehensive telemetry to base station (JSON format)
+void LoRA_SendManualTelemetry(int motor_m1, int motor_m2,
+                               float yaw_deg,
+                               uint16_t prox_left_cm, uint16_t prox_right_cm)
+{
+    if (!lora_state.huart) return;
+
+    // Compact JSON: ~80 bytes on the wire — fast to transmit over LoRa.
+    // "s" = state (always MANUAL here), "m1"/"m2" = motor %, "h" = heading,
+    // "pl"/"pr" = proximity cm (9999 = no detection).
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "{\"s\":\"MANUAL\",\"m1\":%d,\"m2\":%d,\"h\":%.1f,\"pl\":%u,\"pr\":%u}\r\n",
+             motor_m1, motor_m2, yaw_deg,
+             (prox_left_cm  == 65535u) ? 9999u : (unsigned)prox_left_cm,
+             (prox_right_cm == 65535u) ? 9999u : (unsigned)prox_right_cm);
+
+    lora_uart5_send(msg, "manual");
 }
 
 // Send comprehensive telemetry to base station (JSON format)
@@ -639,16 +800,6 @@ void LoRA_SendTelemetry(uint8_t state, float gps_lat, float gps_lon, uint8_t gps
                         uint16_t prox_left_cm, uint16_t prox_right_cm)
 {
     if (!lora_state.huart) return;
-
-    char state_name[16] = "UNKNOWN";
-    switch (state)
-    {
-        case 0: strcpy(state_name, "MANUAL"); break;
-        case 1: strcpy(state_name, "AUTO"); break;
-        case 2: strcpy(state_name, "PAUSE"); break;
-        case 3: strcpy(state_name, "ERROR"); break;
-        case 4: strcpy(state_name, "ESTOP"); break;
-    }
 
     char prox_left_json[20];
     char prox_right_json[20];
@@ -667,7 +818,7 @@ void LoRA_SendTelemetry(uint8_t state, float gps_lat, float gps_lon, uint8_t gps
     char msg[384];
     snprintf(msg, sizeof(msg),
              "{\"state\":\"%s\",\"uptime_ms\":%lu,\"gps\":{\"lat\":%.4f,\"lon\":%.4f,\"fix\":%u,\"sat\":%u,\"hdop\":%.1f},\"motor\":{\"m1\":%d,\"m2\":%d},\"heading\":{\"yaw\":%.1f,\"pitch\":%.1f},\"disp\":{\"salt\":%u,\"brine\":%u},\"temp\":%.1f,\"prox\":{\"left\":%s,\"right\":%s}}\r\n",
-             state_name, (unsigned long)HAL_GetTick(), gps_lat, gps_lon, gps_has_fix, gps_num_sat, gps_hdop,
+             lora_state_name(state), (unsigned long)HAL_GetTick(), gps_lat, gps_lon, gps_has_fix, gps_num_sat, gps_hdop,
              motor_m1, motor_m2, yaw_deg, pitch_deg, salt_rate, brine_rate, temp_c,
              prox_left_json, prox_right_json);
 
@@ -792,7 +943,9 @@ void LoRA_SendRaw(const char *text)
 
     HAL_StatusTypeDef tx_status = HAL_UART_Transmit(lora_state.huart, (uint8_t *)msg, in_len, LORA_UART_TX_TIMEOUT_MS);
     if (tx_status != HAL_OK) {
-        SystemHealth_SetSensorStatus(SENSOR_LORA, SENSOR_TIMEOUT);
+        if (lora_state.tx_fail_streak < 255u) {
+            lora_state.tx_fail_streak++;
+        }
         if (s_lora_verbose) {
             printf("[LORA] Raw TX failed (status=%d)\r\n", (int)tx_status);
         }
@@ -803,6 +956,7 @@ void LoRA_SendRaw(const char *text)
     lora_state.last_tx_payload[sizeof(lora_state.last_tx_payload) - 1] = '\0';
     lora_state.last_tx_ms = HAL_GetTick();
     lora_state.tx_count++;
+    lora_state.tx_fail_streak = 0;
     if (s_lora_verbose) {
         printf("[LORA] Raw TX: %s", msg);
     }
@@ -831,4 +985,29 @@ uint32_t LoRA_GetTxCount(void)
 uint32_t LoRA_GetRxCount(void)
 {
     return lora_state.rx_count;
+}
+
+uint32_t LoRA_GetInvalidCommandCount(void)
+{
+    return lora_state.invalid_command_count;
+}
+
+uint32_t LoRA_GetStartFilterDropCount(void)
+{
+    return lora_state.start_filter_drop_count;
+}
+
+uint32_t LoRA_GetPrefixRejectCount(void)
+{
+    return lora_state.prefix_reject_count;
+}
+
+uint32_t LoRA_GetRxOverflowCount(void)
+{
+    return lora_state.rx_overflow_count;
+}
+
+uint32_t LoRA_GetIsrQueueOverflowCount(void)
+{
+    return lora_state.isr_q_overflow_count;
 }

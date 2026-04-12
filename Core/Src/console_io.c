@@ -299,6 +299,9 @@ static int Console_TryProcessCommandSequence(const char *input, RobotSM_t *sm)
 // Module-level pointer for printf redirection (USART2 by default)
 static UART_HandleTypeDef *g_printf_uart = NULL;
 
+#define CONSOLE_PRINTF_TX_CHUNK 24u
+#define CONSOLE_PRINTF_TX_TIMEOUT_MS 2u
+
 // Store UART handles for printf, GPS, and Sabertooth motor driver
 void Console_Init(ConsoleIO_t *c,
                   UART_HandleTypeDef *uart_printf,
@@ -318,7 +321,29 @@ int _write(int file, char *ptr, int len)
 {
     (void)file;
     if (g_printf_uart == NULL) return len;
-    HAL_UART_Transmit(g_printf_uart, (uint8_t *)ptr, len, HAL_MAX_DELAY);
+
+    // Keep console output responsive: send in short chunks with a bounded timeout
+    // so RX polling is not starved by long printf bursts.
+    int sent = 0;
+    while (sent < len) {
+        uint16_t chunk = (uint16_t)(len - sent);
+        if (chunk > CONSOLE_PRINTF_TX_CHUNK) {
+            chunk = CONSOLE_PRINTF_TX_CHUNK;
+        }
+
+        HAL_StatusTypeDef st = HAL_UART_Transmit(
+            g_printf_uart,
+            (uint8_t *)(ptr + sent),
+            chunk,
+            CONSOLE_PRINTF_TX_TIMEOUT_MS);
+
+        if (st != HAL_OK) {
+            break;
+        }
+
+        sent += (int)chunk;
+    }
+
     return len;
 }
 
@@ -372,13 +397,18 @@ void Console_PrintStatus(const ConsoleIO_t *c,
     uint32_t lora_tx_age = lora_last_tx ? (now_ms - lora_last_tx) : 0xFFFFFFFFu;
     uint32_t lora_rx_age = lora_last_rx ? (now_ms - lora_last_rx) : 0xFFFFFFFFu;
 
-    const uint32_t disp_tx_stale_ms = 5000u;
+    const uint32_t disp_tx_stale_ms = 30000u;
     const uint32_t disp_rx_stale_ms = 30000u;
 
     uint32_t disp_tx_count = Dispersion_GetTxCount();
     uint32_t disp_rx_count = Dispersion_GetRawRxByteCount();
     uint32_t lora_tx_count = LoRA_GetTxCount();
     uint32_t lora_rx_count = LoRA_GetRawFrameCount();
+    uint32_t lora_invalid_count = LoRA_GetInvalidCommandCount();
+    uint32_t lora_start_drop_count = LoRA_GetStartFilterDropCount();
+    uint32_t lora_prefix_reject_count = LoRA_GetPrefixRejectCount();
+    uint32_t lora_overflow_count = LoRA_GetRxOverflowCount();
+    uint32_t lora_isr_q_overflow_count = LoRA_GetIsrQueueOverflowCount();
 
     static uint32_t prev_disp_tx_count = 0;
     static uint32_t prev_disp_rx_count = 0;
@@ -453,9 +483,17 @@ void Console_PrintStatus(const ConsoleIO_t *c,
         printf(ANSI_CYAN "ESP32 LoRa Link: " ANSI_RESET
             "TX[%c] %s  RX[%c] %s\r\n",
             lora_tx_hb,
-            (lora_tx_age == 0xFFFFFFFFu) ? "--" : (lora_tx_age < 3000u ? "OK" : "STALE"),
+            (lora_tx_age == 0xFFFFFFFFu) ? "--" : (lora_tx_age < 5000u ? "OK" : "STALE"),
             lora_rx_hb,
             (lora_rx_age == 0xFFFFFFFFu) ? "--" : (lora_rx_age < 15000u ? "OK" : "STALE"));
+
+        printf(ANSI_CYAN "LoRa Parser: " ANSI_RESET
+            "invalid=%lu  startDrop=%lu  prefixReject=%lu  overflow=%lu  isrQOverflow=%lu\r\n",
+            (unsigned long)lora_invalid_count,
+            (unsigned long)lora_start_drop_count,
+            (unsigned long)lora_prefix_reject_count,
+            (unsigned long)lora_overflow_count,
+            (unsigned long)lora_isr_q_overflow_count);
 
     printf(ANSI_MAGENTA "================================================\r\n" ANSI_RESET);
 }
@@ -465,6 +503,31 @@ static char console_input_buf[256] = {0};
 static uint16_t console_input_idx = 0;
 static volatile uint8_t *s_test_mode_flag = NULL;
 static volatile uint8_t s_esc_pressed = 0;
+static uint8_t s_console_ignore_lf_after_cr = 0;
+
+// ANSI sequence state machine: filter out escape sequences from terminal noise
+static volatile uint8_t s_ansi_state = 0;  // 0: normal, 1: saw ESC, 2: saw ESC+[, 3: in param
+static volatile uint32_t s_ansi_last_time = 0;
+
+#define CONSOLE_RX_ECHO 0
+
+static inline void Console_EchoChar(uint8_t ch)
+{
+    if (!g_printf_uart) return;
+
+    // Non-blocking single-byte echo keeps terminal typing responsive.
+    if (__HAL_UART_GET_FLAG(g_printf_uart, UART_FLAG_TXE)) {
+        g_printf_uart->Instance->DR = ch;
+    }
+}
+
+static inline void Console_EchoString(const char *text)
+{
+    if (!text) return;
+    while (*text) {
+        Console_EchoChar((uint8_t)*text++);
+    }
+}
 
 static inline void Console_WatchdogKick(void)
 {
@@ -807,7 +870,7 @@ void Console_ShowTestMenu(void)
 {
     // Clear console to remove old sensor status messages
     printf("\033[2J\033[H");
-    
+
     printf(ANSI_BOLD ANSI_YELLOW "========== QUICK TEST MENU ==========" ANSI_RESET "\r\n");
     printf(ANSI_BOLD ANSI_MAGENTA "\r\n[Core Diagnostics]\r\n" ANSI_RESET);
     printf("  1. TEST ALL          - Run all diagnostics\r\n");
@@ -883,27 +946,138 @@ uint8_t Console_CheckEscPressed(void)
 // Call this from USART2 RX interrupt handler or polling loop to accumulate input
 void Console_RxByte(uint8_t byte, RobotSM_t *sm)
 {
-    // ESC key (0x1B) - exit continuous tests
-    if (byte == 0x1B) {
-        s_esc_pressed = 1;
-        Console_ForceAllOutputsOff("ESC");
-        printf("\r\n[ESC pressed]\r\n");
-        return;
+    const uint8_t in_test_mode = (s_test_mode_flag && (*s_test_mode_flag != 0)) ? 1u : 0u;
+
+    // ===== ANSI Sequence Filtering =====
+    // Terminal can send ANSI escape sequences (arrow keys, etc.) as 0x1B + 0x5B + [params] + [final].
+    // These must be filtered out to prevent random characters in commands.
+    uint32_t now_ms = HAL_GetTick();
+    
+    if (s_ansi_state == 0) {
+        // Not in an ANSI sequence. Check if this byte starts one.
+        if (byte == 0x1B) {
+            // ESC byte - is it a real ESC keypress or start of ANSI sequence?
+            // If input buffer is empty (console_input_idx==0), treat as real ESC.
+            // Otherwise it's likely ANSI sequence or noise - enter ANSI state.
+            if (console_input_idx == 0 && in_test_mode) {
+                // Real ESC in test mode (buffer empty, we're listening for single keys)
+                s_esc_pressed = 1;
+                Console_ForceAllOutputsOff("ESC");
+                printf("\r\n[ESC pressed]\r\n");
+                return;
+            } else {
+                // Likely ANSI sequence start (or noise). Enter escape state.
+                s_ansi_state = 1;
+                s_ansi_last_time = now_ms;
+                return;  // Consume this byte, don't process it
+            }
+        }
+    } else if (s_ansi_state == 1) {
+        // Saw ESC, waiting for bracket (0x5B) or timeout
+        if (byte == 0x5B) {
+            // Standard ANSI CSI sequence: ESC [
+            s_ansi_state = 2;
+            s_ansi_last_time = now_ms;
+            return;  // Consume, wait for params/final
+        } else if (byte >= 0x40 && byte <= 0x5F && byte != 0x5B) {
+            // Two-byte sequence like ESC N (various codes), exit sequence
+            s_ansi_state = 0;
+            return;  // Consume, done
+        } else if ((now_ms - s_ansi_last_time) > 10) {
+            // Timeout - ESC was standalone, treat as real keypress
+            s_ansi_state = 0;
+            if (in_test_mode && console_input_idx == 0) {
+                s_esc_pressed = 1;
+                Console_ForceAllOutputsOff("ESC");
+                printf("\r\n[ESC pressed]\r\n");
+                return;
+            }
+            // Timed-out ANSI is discarded; re-process this byte
+            s_ansi_state = 0;
+            // Fall through to normal processing of current byte
+        } else {
+            // Still waiting, consume this byte
+            return;
+        }
+    } else if (s_ansi_state == 2) {
+        // Saw ESC [, now consuming parameter/intermediate/final bytes
+        if ((byte >= '0' && byte <= '9') || byte == ';' || byte == ':') {
+            // Parameter or intermediate, keep consuming
+            s_ansi_last_time = now_ms;
+            return;
+        } else if (byte >= 0x20 && byte <= 0x2F) {
+            // Intermediate byte
+            s_ansi_last_time = now_ms;
+            return;
+        } else if (byte >= 0x40 && byte <= 0x7E) {
+            // Final byte - end of sequence
+            s_ansi_state = 0;
+            return;  // Consume, sequence complete
+        } else if (byte == 0x1B) {
+            // Another ESC start? Shouldn't happen, reset
+            s_ansi_state = 1;
+            s_ansi_last_time = now_ms;
+            return;
+        } else if ((now_ms - s_ansi_last_time) > 50) {
+            // Sequence timeout, discard and reset
+            s_ansi_state = 0;
+            // Fall through to re-process current byte
+        } else {
+            // Invalid sequence byte, reset
+            s_ansi_state = 0;
+            // Fall through to re-process current byte
+        }
+    }
+
+    // ===== Normal Command Input Processing (after ANSI filtering) =====
+    
+    // Single-key shortcuts: make menu entry and numeric quick tests reliable even
+    // when Enter handling is flaky under heavy UART traffic.
+    if (console_input_idx == 0) {
+        if (!in_test_mode && (byte == 'T' || byte == 't')) {
+            if (CONSOLE_RX_ECHO) {
+                Console_EchoChar(byte);
+                Console_EchoString("\r\n");
+            }
+            Console_ProcessCommand("T", sm);
+            return;
+        }
+
+        if (in_test_mode && (byte >= '0' && byte <= '9')) {
+            char quick_cmd[2] = {(char)byte, '\0'};
+            if (CONSOLE_RX_ECHO) {
+                Console_EchoChar(byte);
+                Console_EchoString("\r\n");
+            }
+            Console_ProcessCommand(quick_cmd, sm);
+            return;
+        }
     }
     
     // Backspace handling
     if (byte == 0x08 || byte == 0x7F) {
         if (console_input_idx > 0) {
             console_input_idx--;
-            printf("\b \b");  // Erase character on terminal
+            if (CONSOLE_RX_ECHO) {
+                Console_EchoString("\b \b");
+            }
         }
         return;
     }
 
     // Enter/newline: process command
     if (byte == '\r' || byte == '\n') {
+        if (byte == '\r') {
+            s_console_ignore_lf_after_cr = 1;
+        } else if (s_console_ignore_lf_after_cr) {
+            s_console_ignore_lf_after_cr = 0;
+            return;
+        }
+
         console_input_buf[console_input_idx] = '\0';
-        printf("\r\n");
+        if (CONSOLE_RX_ECHO) {
+            Console_EchoString("\r\n");
+        }
         Console_ProcessCommand(console_input_buf, sm);
         console_input_idx = 0;
         return;
@@ -912,7 +1086,9 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm)
     // Printable characters
     if (byte >= 32 && byte < 127 && console_input_idx < sizeof(console_input_buf) - 1) {
         console_input_buf[console_input_idx++] = (char)byte;
-        printf("%c", byte);  // Echo character
+        if (CONSOLE_RX_ECHO) {
+            Console_EchoChar(byte);
+        }
     }
 }
 
@@ -931,6 +1107,16 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 
     char cmd_upper[256];
     Console_NormalizeCommandText(cmd_clean, cmd_upper, sizeof(cmd_upper), 1);
+
+    // TeraTerm/local echo can mirror a single-key shortcut (e.g. "T" -> "TT").
+    // Collapse duplicated one-key shortcuts so test-menu keys still work on one press.
+    size_t cmd_len = strlen(cmd_upper);
+    if (cmd_len == 2 && cmd_upper[0] == cmd_upper[1]) {
+        const char key = cmd_upper[0];
+        if (strchr("TABVFBNKYZGHMOWEQJULRXSIPD?0123456789", key) != NULL) {
+            cmd_upper[1] = '\0';
+        }
+    }
 
     if (strcmp(cmd_upper, "ALLON") == 0 || strcmp(cmd_upper, "FULLON") == 0)
     {
@@ -953,6 +1139,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             __HAL_UART_FLUSH_DRREGISTER(&huart2);
             HAL_UART_DeInit(&huart2);
             HAL_UART_Init(&huart2);
+            HAL_NVIC_DisableIRQ(USART2_IRQn);
+            __HAL_UART_CLEAR_OREFLAG(&huart2);
             // Reassign global printf pointer after reinit
             g_printf_uart = &huart2;
             // Extra wait to ensure reinitialization complete
@@ -976,7 +1164,9 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     }
 
     // ========== QUICK TEST MENU ==========
-    if (strcmp(cmd_upper, "T") == 0)
+    if (strcmp(cmd_upper, "T") == 0
+        || strcmp(cmd_upper, "MENU") == 0
+        || strcmp(cmd_upper, "TESTMENU") == 0)
     {
         if (s_test_mode_flag) {
             *s_test_mode_flag = 1;
@@ -1468,7 +1658,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             }
             for (int i = 0; ag_input[i]; i++) ag_input[i] = (char)toupper((unsigned char)ag_input[i]);
             if (strcmp(ag_input, "ON") == 0 || strcmp(ag_input, "OFF") == 0) {
-                char ag_cmd[24];
+                char ag_cmd[32];
                 snprintf(ag_cmd, sizeof(ag_cmd), "AGITATOR %s", ag_input);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(ag_cmd);
@@ -1500,7 +1690,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             }
             for (int i = 0; th_input[i]; i++) th_input[i] = (char)toupper((unsigned char)th_input[i]);
             if (strcmp(th_input, "ON") == 0 || strcmp(th_input, "OFF") == 0) {
-                char th_cmd[24];
+                char th_cmd[32];
                 snprintf(th_cmd, sizeof(th_cmd), "THROWER %s", th_input);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(th_cmd);
@@ -1532,7 +1722,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             }
             for (int i = 0; relay_input[i]; i++) relay_input[i] = (char)toupper((unsigned char)relay_input[i]);
             if (strcmp(relay_input, "ON") == 0 || strcmp(relay_input, "OFF") == 0) {
-                char relay_cmd[24];
+                char relay_cmd[32];
                 snprintf(relay_cmd, sizeof(relay_cmd), "RELAY %s", relay_input);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(relay_cmd);
@@ -2210,6 +2400,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
-    // Optional: feedback when command is ignored
-    // printf(ANSI_YELLOW "Unknown/ignored cmd: %s\r\n" ANSI_RESET, cmd);
+    // Always provide feedback so partial/dropped serial input is visible to user.
+    printf(ANSI_YELLOW "[DIAG] Unrecognized command: %s\r\n" ANSI_RESET, cmd_clean);
+    printf("[DIAG] Try: TEST MOTOR 1 30  (or type HELP)\r\n");
 }

@@ -21,6 +21,7 @@ void Handle_Error(void);
 
 // Emergency stop handler (STATE_ESTOP)
 void Emergency_Stop(void);
+void Emergency_Stop_ResetOnce(void);  // call when ESTOP latch is cleared
 
 // Parse RC speed command "M1:<speed> M2:<speed>" and set motor speeds
 void ParseManualSpeedCommand(const char *cmd);

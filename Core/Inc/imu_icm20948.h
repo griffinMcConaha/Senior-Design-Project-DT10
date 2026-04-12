@@ -70,6 +70,13 @@ uint8_t IMU_IsCalibrated(void);
 /** @brief Check if last read succeeded */
 uint8_t IMU_LastOk(void);
 
+/** @brief Check if initialization succeeded */
+uint8_t IMU_GetInitStatus(void);
+
+/** @brief Periodic recovery: checks if IMU is alive, attempts soft reset + re-init if dead
+ *  Call from main loop (~1 Hz). Returns 1 if OK, 0 if failed. */
+uint8_t IMU_CheckAndRecover(void);
+
 /** @brief Force IMU reset */
 void IMU_SoftReset(void);
 

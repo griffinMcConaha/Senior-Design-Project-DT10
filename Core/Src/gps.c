@@ -1,5 +1,6 @@
 #include "gps.h"
 #include "system_health.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -13,6 +14,13 @@
 #define GPS_STALE_MS 5000u
 #endif
 
+#ifndef GPS_AUTO_BAUD_ENABLED
+#define GPS_AUTO_BAUD_ENABLED 1
+#endif
+
+#define GPS_NMEA_SILENT_SWITCH_MS 6000u
+#define GPS_BAUD_SWITCH_COOLDOWN_MS 8000u
+
 // Module-level UART handle and receive buffer
 static UART_HandleTypeDef *s_huart = NULL;
 static uint8_t s_rx_byte = 0;
@@ -23,7 +31,66 @@ static volatile int s_idx = 0;
 
 // Last RX timestamp and current GPS data
 static volatile uint32_t s_last_rx_ms = 0;
+static volatile uint32_t s_rx_byte_count = 0;  // total bytes received; 0 = UART not flowing
+static volatile uint32_t s_last_nmea_ms = 0;
+static volatile uint32_t s_last_baud_switch_ms = 0;
 static volatile GPS_Data_t s_gps = {0};
+static volatile uint8_t s_rmc_fix_valid = 0;
+static volatile uint8_t s_gga_fix_valid = 0;
+static volatile uint8_t s_gsa_fix_valid = 0;
+static volatile uint32_t s_nmea_line_count = 0;
+static volatile uint32_t s_nmea_unknown_count = 0;
+
+static const uint32_t s_gps_baud_table[] = {9600u, 38400u, 57600u, 115200u};
+static uint8_t s_gps_baud_index = 0;
+
+static void GPS_UpdateFixState(void)
+{
+    s_gps.has_fix = (s_rmc_fix_valid || s_gga_fix_valid || s_gsa_fix_valid) ? 1u : 0u;
+}
+
+static void GPS_SwitchToBaud(uint32_t baud)
+{
+    if (!s_huart) return;
+
+    HAL_UART_AbortReceive_IT(s_huart);
+    __HAL_UART_CLEAR_OREFLAG(s_huart);
+    (void)HAL_UART_DeInit(s_huart);
+
+    s_huart->Init.BaudRate = baud;
+    if (HAL_UART_Init(s_huart) == HAL_OK) {
+        (void)HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
+        printf("[GPS] Auto-baud switched to %lu\r\n", (unsigned long)baud);
+    } else {
+        printf("[GPS] Auto-baud switch failed for %lu\r\n", (unsigned long)baud);
+    }
+}
+
+static void GPS_AutoBaudTick(uint32_t now_ms)
+{
+#if GPS_AUTO_BAUD_ENABLED
+    if (!s_huart) return;
+    if (s_last_rx_ms == 0u) return;
+
+    // If there has been no recent UART traffic, don't churn baud rates.
+    if ((now_ms - s_last_rx_ms) > 2000u) return;
+
+    // If valid NMEA lines are arriving recently, keep current baud.
+    if (s_last_nmea_ms != 0u && (now_ms - s_last_nmea_ms) <= GPS_NMEA_SILENT_SWITCH_MS) {
+        return;
+    }
+
+    if ((now_ms - s_last_baud_switch_ms) < GPS_BAUD_SWITCH_COOLDOWN_MS) {
+        return;
+    }
+
+    s_gps_baud_index = (uint8_t)((s_gps_baud_index + 1u) % (sizeof(s_gps_baud_table) / sizeof(s_gps_baud_table[0])));
+    s_last_baud_switch_ms = now_ms;
+    GPS_SwitchToBaud(s_gps_baud_table[s_gps_baud_index]);
+#else
+    (void)now_ms;
+#endif
+}
 
 // Convert NMEA degree-minute format (ddmm.mmmm) to decimal degrees
 static double NMEA_DegMin_To_Deg(const char *field, char hemi)
@@ -42,9 +109,8 @@ static double NMEA_DegMin_To_Deg(const char *field, char hemi)
 // Parse RMC sentence (Recommended Minimum Course and Ground Speed)
 static void GPS_Parse_RMC(const char *sentence)
 {
-    // Expect "$GNRMC" or "$GPRMC"
-    if (strncmp(sentence, "$GNRMC", 6) != 0 &&
-        strncmp(sentence, "$GPRMC", 6) != 0)
+    // Accept any NMEA talker ID with RMC payload, e.g. $GPRMC, $GNRMC.
+    if (!sentence || strlen(sentence) < 6 || sentence[0] != '$' || strncmp(sentence + 3, "RMC", 3) != 0)
         return;
 
     char buf[GPS_LINE_MAX];
@@ -83,8 +149,8 @@ static void GPS_Parse_RMC(const char *sentence)
         field++;
     }
 
-    // Update fix status
-    s_gps.has_fix = (status == 'A') ? 1 : 0;
+    s_rmc_fix_valid = (status == 'A') ? 1u : 0u;
+    GPS_UpdateFixState();
 
     // Update position, speed, and course (preserve hdop, vdop, altitude, sat count from GGA/GSA)
     if (lat_field && *lat_field)
@@ -107,9 +173,8 @@ static void GPS_Parse_RMC(const char *sentence)
 // Extracts: quality, num_satellites, HDOP, altitude
 static void GPS_Parse_GGA(const char *sentence)
 {
-    // Expect "$GNGGA" or "$GPGGA"
-    if (strncmp(sentence, "$GNGGA", 6) != 0 &&
-        strncmp(sentence, "$GPGGA", 6) != 0)
+    // Accept any NMEA talker ID with GGA payload, e.g. $GPGGA, $GNGGA.
+    if (!sentence || strlen(sentence) < 6 || sentence[0] != '$' || strncmp(sentence + 3, "GGA", 3) != 0)
         return;
 
     char buf[GPS_LINE_MAX];
@@ -119,6 +184,11 @@ static void GPS_Parse_GGA(const char *sentence)
     char *token = NULL;
     int field = 0;
 
+    uint8_t quality = 0;
+    const char *lat_field = NULL;
+    char lat_hemi = 'N';
+    const char *lon_field = NULL;
+    char lon_hemi = 'E';
     uint8_t num_sat = 0;
     float hdop = 10.0f;  // worst case
     float alt = 0.0f;
@@ -128,9 +198,20 @@ static void GPS_Parse_GGA(const char *sentence)
     {
         switch (field)
         {
+            case 2:
+                lat_field = token;
+                break;
+            case 3:
+                if (*token) lat_hemi = token[0];
+                break;
+            case 4:
+                lon_field = token;
+                break;
+            case 5:
+                if (*token) lon_hemi = token[0];
+                break;
             case 6:
-                // Quality: 0=invalid, 1=GPS fix, 2=DGPS fix, 6=dead reckoning
-                // (has_fix already set by RMC parser)
+                if (*token) quality = (uint8_t)atoi(token);
                 break;
             case 7:
                 // Number of satellites in use
@@ -152,19 +233,29 @@ static void GPS_Parse_GGA(const char *sentence)
     }
 
     // Update GPS data
+    if (lat_field && *lat_field) {
+        s_gps.latitude_deg = (float)NMEA_DegMin_To_Deg(lat_field, lat_hemi);
+    }
+
+    if (lon_field && *lon_field) {
+        s_gps.longitude_deg = (float)NMEA_DegMin_To_Deg(lon_field, lon_hemi);
+    }
+
     s_gps.num_satellites = num_sat;
     s_gps.hdop = hdop;
     s_gps.altitude_m = alt;
-    // Quality already set in RMC (has_fix), but GGA provides redundant confirmation
+    // Some receivers briefly report quality>0 while satellites field is not yet stable.
+    // Treat quality as the primary fix signal so we don't miss valid locks.
+    s_gga_fix_valid = (quality > 0u) ? 1u : 0u;
+    GPS_UpdateFixState();
 }
 
 // Parse GSA sentence (DOP and active satellites)
 // Extracts: VDOP (vertical dilution of precision)
 static void GPS_Parse_GSA(const char *sentence)
 {
-    // Expect "$GNGSA" or "$GPGSA"
-    if (strncmp(sentence, "$GNGSA", 6) != 0 &&
-        strncmp(sentence, "$GPGSA", 6) != 0)
+    // Accept any NMEA talker ID with GSA payload, e.g. $GPGSA, $GNGSA.
+    if (!sentence || strlen(sentence) < 6 || sentence[0] != '$' || strncmp(sentence + 3, "GSA", 3) != 0)
         return;
 
     char buf[GPS_LINE_MAX];
@@ -173,6 +264,7 @@ static void GPS_Parse_GSA(const char *sentence)
 
     char *token = NULL;
     int field = 0;
+    uint8_t fix_type = 1; // 1=no fix, 2=2D, 3=3D
     float vdop = 10.0f;
 
     token = strtok(buf, ",");
@@ -180,6 +272,9 @@ static void GPS_Parse_GSA(const char *sentence)
     {
         switch (field)
         {
+            case 2:
+                if (*token) fix_type = (uint8_t)atoi(token);
+                break;
             case 17:
                 // VDOP (Vertical Dilution of Precision)
                 if (*token) vdop = (float)atof(token);
@@ -192,6 +287,8 @@ static void GPS_Parse_GSA(const char *sentence)
     }
 
     s_gps.vdop = vdop;
+    s_gsa_fix_valid = (fix_type >= 2u) ? 1u : 0u;
+    GPS_UpdateFixState();
 }
 
 // Initialize GPS parser with UART handle and enable RX interrupt
@@ -202,23 +299,58 @@ void GPS_Init(UART_HandleTypeDef *huart)
     s_idx = 0;
     s_line[0] = 0;
     s_last_rx_ms = 0;
+    s_rx_byte_count = 0;
+    s_last_nmea_ms = 0;
+    s_last_baud_switch_ms = HAL_GetTick();
     s_gps.has_fix = 0;
+    s_rmc_fix_valid = 0;
+    s_gga_fix_valid = 0;
+    s_gsa_fix_valid = 0;
+    s_nmea_line_count = 0;
+    s_nmea_unknown_count = 0;
+
+    if (s_huart) {
+        uint32_t configured_baud = s_huart->Init.BaudRate;
+        for (uint8_t i = 0; i < (sizeof(s_gps_baud_table) / sizeof(s_gps_baud_table[0])); i++) {
+            if (s_gps_baud_table[i] == configured_baud) {
+                s_gps_baud_index = i;
+                break;
+            }
+        }
+    }
 
     // Start RX interrupt for 1 byte
     HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
 }
 
+uint32_t GPS_GetRxByteCount(void)
+{
+    return s_rx_byte_count;
+}
+
 void GPS_RxByte(uint8_t b)
 {
 	s_last_rx_ms = HAL_GetTick();   // mark activity for freshness
+    s_rx_byte_count++;
     if (b == '\n' || b == '\r')
     {
         if (s_idx > 0)
         {
             s_line[s_idx] = 0;
-            GPS_Parse_RMC(s_line);
-            GPS_Parse_GGA(s_line);
-            GPS_Parse_GSA(s_line);
+            if (s_line[0] == '$' && strlen(s_line) >= 6u) {
+                s_last_nmea_ms = s_last_rx_ms;
+                s_nmea_line_count++;
+
+                if (strncmp(s_line + 3, "RMC", 3) == 0) {
+                    GPS_Parse_RMC(s_line);
+                } else if (strncmp(s_line + 3, "GGA", 3) == 0) {
+                    GPS_Parse_GGA(s_line);
+                } else if (strncmp(s_line + 3, "GSA", 3) == 0) {
+                    GPS_Parse_GSA(s_line);
+                } else {
+                    s_nmea_unknown_count++;
+                }
+            }
         }
         s_idx = 0;
     }
@@ -235,6 +367,9 @@ void GPS_Tick(uint32_t now_ms)
 {
     // If stale, drop fix (this mirrors what you were doing in main)
     if (s_last_rx_ms != 0 && (now_ms - s_last_rx_ms) > GPS_STALE_MS) {
+        s_rmc_fix_valid = 0;
+        s_gga_fix_valid = 0;
+        s_gsa_fix_valid = 0;
         s_gps.has_fix = 0;
         SystemHealth_SetSensorStatus(SENSOR_GPS, SENSOR_TIMEOUT);
     } else if (s_gps.has_fix) {
@@ -244,6 +379,8 @@ void GPS_Tick(uint32_t now_ms)
         // GPS is running but no fix yet
         SystemHealth_SetSensorStatus(SENSOR_GPS, SENSOR_TIMEOUT);
     }
+
+    GPS_AutoBaudTick(now_ms);
 }
 
 const GPS_Data_t* GPS_Get(void)
@@ -283,4 +420,61 @@ void GPS_HAL_RxCpltCallback(UART_HandleTypeDef *huart)
     s_last_rx_ms = HAL_GetTick();
 
     HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
+}
+
+// Reset GPS parser (clear buffers and fix state) for recovery
+void GPS_Reset(void)
+{
+    s_idx = 0;
+    s_line[0] = 0;
+    s_gps.has_fix = 0;
+    s_rmc_fix_valid = 0;
+    s_gga_fix_valid = 0;
+    s_gsa_fix_valid = 0;
+    printf("[GPS] Parser reset\r\n");
+}
+
+// Get GPS receiver status: 1 if healthy, 0 if not responding
+uint8_t GPS_IsHealthy(void)
+{
+    // Healthy if we're receiving data fairly recently
+    // Even without a fix, receiving data is good
+    uint32_t now_ms = HAL_GetTick();
+    if (s_last_rx_ms == 0) return 0;  // Never received anything
+    
+    uint32_t age_ms = now_ms - s_last_rx_ms;
+    return (age_ms < 10000u) ? 1 : 0;  // Not responsive if no data for 10 seconds
+}
+
+// Attempt recovery: reset parser and restart RX if possible
+uint8_t GPS_CheckAndRecover(void)
+{
+    if (s_huart == NULL) {
+        printf("[GPS] Recovery FAILED: UART not initialized\r\n");
+        return 0;
+    }
+    
+    // Check if receiver is dead (no data for >10 seconds)
+    if (GPS_IsHealthy()) {
+        // Already healthy, no recovery needed
+        return 1;
+    }
+    
+    printf("[GPS] Recovery: Parser stalled, resetting...\r\n");
+    GPS_Reset();
+    __HAL_UART_CLEAR_OREFLAG(s_huart);
+
+    // Re-enable RX interrupt. HAL_BUSY here usually means RX is already armed.
+    HAL_StatusTypeDef status = HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
+    if (status == HAL_OK || status == HAL_BUSY) {
+        if (status == HAL_OK) {
+            printf("[GPS] Recovery: RX interrupt re-enabled\r\n");
+        } else {
+            printf("[GPS] Recovery: RX already armed\r\n");
+        }
+        return 1;
+    } else {
+        printf("[GPS] Recovery FAILED: Could not re-enable RX (error %d)\r\n", status);
+        return 0;
+    }
 }

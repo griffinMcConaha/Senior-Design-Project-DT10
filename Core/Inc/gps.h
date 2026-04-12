@@ -36,6 +36,18 @@ uint32_t GPS_GetLastRxMs(void);
 
 void GPS_HAL_RxCpltCallback(UART_HandleTypeDef *huart);
 
+// Reset GPS parser state (for recovery)
+void GPS_Reset(void);
+
+// Check if GPS receiver is responsive (1=healthy, 0=stalled)
+uint8_t GPS_IsHealthy(void);
+
+// Total raw bytes received since GPS_Init (non-zero means UART RX is flowing)
+uint32_t GPS_GetRxByteCount(void);
+
+// Attempt recovery: reset parser and restart RX if stalled
+uint8_t GPS_CheckAndRecover(void);
+
 #ifdef __cplusplus
 }
 #endif

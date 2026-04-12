@@ -93,13 +93,15 @@ void ManualControl_Task(void)
     {
         last_health_check = now;
 
-        // Read current sensor status
-        IMU_Status_t imu = IMU_Read();
+         // Use debounced health state from main loop instead of issuing an
+         // extra IMU bus read in manual mode.
+         const SystemHealthState_t *hs = SystemHealth_GetState();
+         const char *imu_s = (hs->sensor_status[SENSOR_IMU] == SENSOR_OK) ? "OK" : "FAIL";
         const GPS_Data_t *gps = GPS_Get();
 
         // Log sensor health
         printf("[RC] Health check - IMU: %s  GPS: %s\r\n",
-               imu.ok ? "OK" : "FAIL", gps->has_fix ? "FIX" : "NO_FIX");
+             imu_s, gps->has_fix ? "FIX" : "NO_FIX");
 
         // Optional: Detect and report sensor failures
         // Could call: RobotSM_SetFault(&g_sm, FAULT_IMU_TIMEOUT) if imu fails
@@ -443,11 +445,11 @@ void Handle_Error(void)
     // Ensure motors are stopped
     Sabertooth_StopAll();
 
-    // Log periodically (1 Hz) to keep user informed of error state
+    // Log every 10 seconds - frequent enough to notice, infrequent enough not to spam
     static uint32_t last_log = 0;
     uint32_t now = HAL_GetTick();
 
-    if ((now - last_log) >= 1000)
+    if ((now - last_log) >= 10000)
     {
         last_log = now;
 
@@ -455,11 +457,13 @@ void Handle_Error(void)
         extern RobotSM_t g_sm;
         FaultCode_t fault = RobotSM_GetFault(&g_sm);
 
-        printf("[ERROR] System in error state - Fault: %d\r\n", (int)fault);
-        printf("[ERROR] Send 'PAUSE' command to recover\r\n");
+        // Report which sensors are causing the error for easier diagnosis
+        const SystemHealthState_t *hs = SystemHealth_GetState();
+        const char *imu_s = (hs->sensor_status[SENSOR_IMU] == SENSOR_OK) ? "OK" : "FAIL";
+        const char *gps_s = (hs->sensor_status[SENSOR_GPS] == SENSOR_OK) ? "OK" : "no-fix";
 
-        // Optional: Blink error LED (if implemented)
-        // SystemHealth_UpdateLeds(STATE_ERROR, ...);
+        printf("[ERROR] State: ERROR  Fault=%d  IMU=%s  GPS=%s\r\n", (int)fault, imu_s, gps_s);
+        printf("[ERROR] Send 'PAUSE' to recover (or 'T' at boot for test mode)\r\n");
     }
 
     // TODO: Future enhancements
@@ -469,25 +473,29 @@ void Handle_Error(void)
 }
 
 // Emergency stop handler: critical failure or user button, latched until reset
+static uint8_t s_estop_logged = 0;
+
+void Emergency_Stop_ResetOnce(void)
+{
+    s_estop_logged = 0;
+}
+
 void Emergency_Stop(void)
 {
     // Ensure motors are stopped immediately
     Sabertooth_StopAll();
 
-    // Log ESTOP activation (first time only)
-    static uint8_t once = 0;
-    if (!once)
+    // Log ESTOP activation once per latch cycle.
+    // s_estop_logged is reset by Emergency_Stop_ResetOnce() when the ESTOP
+    // latch is cleared (ESTOP -> PAUSE), so the next ESTOP always prints.
+    if (!s_estop_logged)
     {
         printf("[ESTOP] EMERGENCY STOP ACTIVATED\r\n");
         printf("[ESTOP] Motor shutdown complete\r\n");
         printf("[ESTOP] System is LATCHED - send 'PAUSE' then manual command to recover\r\n");
-        once = 1;
+        s_estop_logged = 1;
     }
 
     // Note: ESTOP latch is managed by state machine (RobotSM_HandleTransitions)
     // Cannot exit this state without going through PAUSE first
 }
-
-
-
-

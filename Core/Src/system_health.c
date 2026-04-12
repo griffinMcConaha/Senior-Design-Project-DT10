@@ -65,13 +65,11 @@ uint8_t SystemHealth_ResetEmergencyStop(void)
     if (!health_state.emergency_stop_active)
         return 1;  // Not in ESTOP, nothing to reset
     
-    // Check if conditions are safe for reset (minimum: IMU + GPS healthy)
+    // Check if conditions are safe for reset.
+    // GPS is intentionally NOT required here because manual operation is valid
+    // without GPS lock; requiring GPS would permanently trap recovery indoors.
     if (health_state.sensor_status[SENSOR_IMU] != SENSOR_OK) {
         printf(ANSI_YELLOW "[HEALTH] Cannot reset ESTOP: IMU not healthy\r\n" ANSI_RESET);
-        return 0;
-    }
-    if (health_state.sensor_status[SENSOR_GPS] != SENSOR_OK) {
-        printf(ANSI_YELLOW "[HEALTH] Cannot reset ESTOP: GPS not healthy\r\n" ANSI_RESET);
         return 0;
     }
 
@@ -196,9 +194,12 @@ uint8_t SystemHealth_SafetyCheck(const SystemHealthInputs_t *in,
         return 1;
     }
 
-    // Next: GPS no-fix => ERROR (but don't override ESTOP)
+    // GPS no-fix => ERROR only when running autonomously.
+    // Manual and Pause states do not need GPS — a human operator can drive
+    // with their own eyes. Enforcing ERROR here would make manual LoRa driving
+    // permanently impossible without an outdoor GPS fix.
     if (!in->gps_fix) {
-        if (current != STATE_ESTOP) {
+        if (current == STATE_AUTO) {
             *out_request_state = STATE_ERROR;
             return 1;
         }

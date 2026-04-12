@@ -81,6 +81,7 @@ static I2C_HandleTypeDef *s_hi2c = NULL;
 
 static uint8_t s_last_ok = 0;
 static uint8_t s_calibrated = 0;
+static uint8_t s_init_ok = 0;  // Tracks whether IMU init succeeded
 
 // raw last readings (counts)
 static float s_ax=0, s_ay=0, s_az=0;
@@ -117,6 +118,37 @@ static HAL_StatusTypeDef IMU_I2C_Write(uint8_t reg, uint8_t data)
     return HAL_I2C_Mem_Write(s_hi2c, ICM20948_ADDR, reg, 1, &data, 1, I2C_TIMEOUT_MS);
 }
 
+static HAL_StatusTypeDef IMU_ProbeAndSelectAddress(void)
+{
+    // Use a WHO_AM_I register read instead of HAL_I2C_IsDeviceReady.
+    // HAL_I2C_IsDeviceReady generates a naked address-only frame which fails
+    // on STM32F4 HAL even when the device is present; Mem_Read uses the same
+    // I2C path as normal operation and also verifies the device ID.
+    static const uint8_t candidate_addrs[] = {0x69u, 0x68u};
+    for (uint32_t attempt = 0; attempt < 3u; ++attempt) {
+        for (size_t i = 0; i < (sizeof(candidate_addrs) / sizeof(candidate_addrs[0])); ++i) {
+            uint8_t addr_7bit = candidate_addrs[i];
+            uint8_t test_addr = (uint8_t)(addr_7bit << 1);
+            uint8_t who = 0;
+            HAL_StatusTypeDef st = HAL_I2C_Mem_Read(
+                s_hi2c, test_addr, WHO_AM_I, 1, &who, 1, I2C_TIMEOUT_MS);
+            if (st == HAL_OK && who == 0xEAu) {
+                s_imu_addr = test_addr;
+                printf(ANSI_GREEN "[IMU] Device found at 0x%02X (WHO_AM_I=0x%02X)\r\n" ANSI_RESET, addr_7bit, who);
+                return HAL_OK;
+            }
+        }
+
+        HAL_I2C_DeInit(s_hi2c);
+        HAL_Delay(5);
+        HAL_I2C_Init(s_hi2c);
+        HAL_Delay(50);
+    }
+
+    printf(ANSI_RED "[IMU] Device not responding at 0x68 or 0x69\r\n" ANSI_RESET);
+    return HAL_ERROR;
+}
+
 // Set IMU I2C address (must be called before IMU_Init)
 void IMU_SetAddress(uint8_t addr_7bit)
 {
@@ -127,40 +159,6 @@ void IMU_SetAddress(uint8_t addr_7bit)
 uint8_t IMU_GetAddress(void)
 {
     return s_imu_addr >> 1;
-}
-
-static void ICM20948_CheckWHOAMI(void)
-{
-    uint8_t who = 0;
-    HAL_StatusTypeDef status;
-    
-    ICM20948_SelectBank(0);
-    
-    // Try direct I2C read without bank selection first
-    status = HAL_I2C_IsDeviceReady(s_hi2c, ICM20948_ADDR, 3, I2C_TIMEOUT_MS);
-    if (status != HAL_OK)
-    {
-        printf(ANSI_RED "[IMU] Device not responding to I2C address 0x%02X (HAL error: %d)\r\n" ANSI_RESET, 
-               ICM20948_ADDR >> 1, status);
-        return;
-    }
-    printf(ANSI_GREEN "[IMU] Device ACKed at address 0x%02X\r\n" ANSI_RESET, ICM20948_ADDR >> 1);
-    
-    status = IMU_I2C_Read(WHO_AM_I, &who, 1);
-    if (status != HAL_OK)
-    {
-        printf(ANSI_RED "[IMU] WHO_AM_I read failed (HAL error: %d)\r\n" ANSI_RESET, status);
-        return;
-    }
-    
-    if (who == 0xEA)
-    {
-        printf(ANSI_GREEN "[IMU] WHO_AM_I = 0x%02X - CORRECT!\r\n" ANSI_RESET, who);
-    }
-    else
-    {
-        printf(ANSI_YELLOW "[IMU] WHO_AM_I = 0x%02X (expected 0xEA) - WRONG!\r\n" ANSI_RESET, who);
-    }
 }
 
 #if IMU_USE_MAG
@@ -351,8 +349,13 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
     s_hi2c = hi2c;
     s_last_ok = 0;
     s_calibrated = 0;
+    s_init_ok = 0;
 
     printf(ANSI_CYAN "[IMU] Starting ICM-20948 initialization...\r\n" ANSI_RESET);
+
+    if (IMU_ProbeAndSelectAddress() != HAL_OK) {
+        return;
+    }
 
     // --- Bank 0 ---
     ICM20948_SelectBank(0);
@@ -361,9 +364,7 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
     printf("[IMU] Resetting device...\r\n");
     status = IMU_I2C_Write(PWR_MGMT_1, 0x80);
     if (status != HAL_OK) {
-        printf(ANSI_RED "[IMU] CRITICAL: Reset command failed (error: %d)\r\n" ANSI_RESET, status);
-        printf(ANSI_YELLOW "[IMU] Check I2C wiring: SDA=PB9, SCL=PB8, VCC=3.3V, GND\r\n" ANSI_RESET);
-        return;
+        printf(ANSI_YELLOW "[IMU] WARNING: Reset command failed (error: %d) - continuing anyway\r\n" ANSI_RESET, status);
     }
     HAL_Delay(100);
 
@@ -371,9 +372,7 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
     printf("[IMU] Waking device...\r\n");
     status = IMU_I2C_Write(PWR_MGMT_1, 0x01);
     if (status != HAL_OK) {
-        printf(ANSI_RED "[IMU] CRITICAL: Wake command failed (error: %d)\r\n" ANSI_RESET, status);
-        printf(ANSI_YELLOW "[IMU] Check I2C wiring: SDA=PB9, SCL=PB8, VCC=3.3V, GND\r\n" ANSI_RESET);
-        return;
+        printf(ANSI_YELLOW "[IMU] WARNING: Wake command failed (error: %d) - continuing anyway\r\n" ANSI_RESET, status);
     }
     HAL_Delay(10);
 
@@ -390,9 +389,20 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
         printf(ANSI_YELLOW "[IMU] WARNING: Failed to disable low-power mode (error: %d)\r\n" ANSI_RESET, status);
     }
 
-    // Check WHO_AM_I
+    // Check WHO_AM_I before continuing with additional configuration.
     printf("[IMU] Checking WHO_AM_I...\r\n");
-    ICM20948_CheckWHOAMI();
+    {
+        uint8_t who = 0;
+        HAL_StatusTypeDef who_status = IMU_I2C_Read(WHO_AM_I, &who, 1);
+        if (who_status != HAL_OK || who != 0xEA) {
+            printf(ANSI_RED "[IMU] FAILED: WHO_AM_I %s (value=0x%02X, error=%d)\r\n" ANSI_RESET,
+                   (who_status == HAL_OK) ? "mismatch" : "read failed",
+                   who,
+                   who_status);
+            return;
+        }
+        printf(ANSI_GREEN "[IMU] WHO_AM_I = 0x%02X - Device verified!\r\n" ANSI_RESET, who);
+    }
 
     // --- Bank 2 configs ---
     printf("[IMU] Configuring accelerometer and gyroscope...\r\n");
@@ -424,6 +434,8 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
     printf(ANSI_YELLOW "[IMU] Magnetometer disabled (IMU_USE_MAG=0)\r\n" ANSI_RESET);
 #endif
 
+    // Mark initialization as successful only if device verified
+    s_init_ok = 1;
     printf(ANSI_GREEN "[IMU] Initialization complete (accel/gyro%s)\r\n" ANSI_RESET,
            IMU_USE_MAG ? " + mag" : "");
 }
@@ -433,8 +445,10 @@ IMU_Status_t IMU_Read(void)
     IMU_Status_t out;
     memset(&out, 0, sizeof(out));
 
-    if (s_hi2c == NULL)
+    if (s_hi2c == NULL || !s_init_ok)
     {
+        // Not initialized: do not attempt I2C reads on an unconfigured device.
+        // Health status is managed exclusively through main.c's debounced imu_ok.
         out.ok = 0;
         return out;
     }
@@ -457,15 +471,11 @@ IMU_Status_t IMU_Read(void)
     s_last_ok = (st == HAL_OK) ? 1u : 0u;
     out.ok = s_last_ok;
 
-    // Report health status to system health monitor
-    if (st != HAL_OK) {
-        SystemHealth_SetSensorStatus(SENSOR_IMU, SENSOR_TIMEOUT);
-    } else if (s_temperature > 70.0f || s_temperature < -20.0f) {
-        // Temperature out of safe range
-        SystemHealth_SetSensorStatus(SENSOR_IMU, SENSOR_DEGRADED);
-    } else {
-        SystemHealth_SetSensorStatus(SENSOR_IMU, SENSOR_OK);
-    }
+    // Health status is intentionally NOT set here.
+    // The debounced imu_ok in main.c's 50 Hz block is the single source of
+    // truth fed into SystemHealth_SafetyCheck, which then calls
+    // SystemHealth_SetSensorStatus. Calling it here directly would bypass
+    // the consecutive-failure debounce and cause false ESTOP triggers.
 
     // Raw
     out.raw_ax = s_ax; out.raw_ay = s_ay; out.raw_az = s_az;
@@ -625,4 +635,37 @@ void IMU_RuntimeCheckWHOAMI(void)
         s_last_ok = 0;
         printf("IMU LOST! WHO_AM_I = 0x%02X\r\n", who);
     }
+}
+
+uint8_t IMU_GetInitStatus(void)
+{
+    return s_init_ok;
+}
+
+// Periodic recovery check: call from main loop (~1Hz)
+// If IMU isn't responding, attempt soft reset and re-init
+uint8_t IMU_CheckAndRecover(void)
+{
+    if (!s_hi2c) return 0;
+    
+    // If already OK and last read succeeded, no recovery needed
+    if (s_init_ok && s_last_ok) {
+        return 1;
+    }
+
+    printf(ANSI_YELLOW "[IMU] Recovery: Attempting re-initialization...\r\n" ANSI_RESET);
+    s_init_ok = 0;
+    s_last_ok = 0;
+    s_calibrated = 0;
+
+    IMU_Init(s_hi2c);
+
+    if (s_init_ok) {
+        printf(ANSI_GREEN "[IMU] Recovery SUCCESS: IMU back online\r\n" ANSI_RESET);
+        IMU_Calibrate(200, 5);
+        return 1;
+    }
+
+    printf(ANSI_RED "[IMU] Recovery FAILED: IMU still not responding\r\n" ANSI_RESET);
+    return 0;
 }

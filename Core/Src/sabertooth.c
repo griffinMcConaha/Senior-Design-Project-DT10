@@ -4,6 +4,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define SABERTOOTH_VERBOSE_FEEDBACK_PRINTS 0
+
 // Module-level UART handle for motor driver communication
 static UART_HandleTypeDef *s_huart = NULL;
 
@@ -122,24 +124,34 @@ static void sabertooth_parse_response(void)
     switch (response_type) {
         case 'B':  // Battery voltage (in tenths of volt)
             s_battery_voltage = value / 10.0f;
-            printf("[FEEDBACK] Battery: %.1f V\r\n", s_battery_voltage);
+            if (SABERTOOTH_VERBOSE_FEEDBACK_PRINTS) {
+                printf("[FEEDBACK] Battery: %.1f V\r\n", s_battery_voltage);
+            }
             break;
         case 'C':  // Motor current (in tenths of amp)
             if (motor == 1) {
                 s_m1_current = value / 10.0f;
-                printf("[FEEDBACK] M1 Current: %.1f A\r\n", s_m1_current);
+                if (SABERTOOTH_VERBOSE_FEEDBACK_PRINTS) {
+                    printf("[FEEDBACK] M1 Current: %.1f A\r\n", s_m1_current);
+                }
             } else {
                 s_m2_current = value / 10.0f;
-                printf("[FEEDBACK] M2 Current: %.1f A\r\n", s_m2_current);
+                if (SABERTOOTH_VERBOSE_FEEDBACK_PRINTS) {
+                    printf("[FEEDBACK] M2 Current: %.1f A\r\n", s_m2_current);
+                }
             }
             break;
         case 'T':  // Temperature (in Celsius)
             if (motor == 1) {
                 s_m1_temperature = value;
-                printf("[FEEDBACK] M1 Temp: %d C\r\n", s_m1_temperature);
+                if (SABERTOOTH_VERBOSE_FEEDBACK_PRINTS) {
+                    printf("[FEEDBACK] M1 Temp: %d C\r\n", s_m1_temperature);
+                }
             } else {
                 s_m2_temperature = value;
-                printf("[FEEDBACK] M2 Temp: %d C\r\n", s_m2_temperature);
+                if (SABERTOOTH_VERBOSE_FEEDBACK_PRINTS) {
+                    printf("[FEEDBACK] M2 Temp: %d C\r\n", s_m2_temperature);
+                }
             }
             break;
     }
