@@ -22,6 +22,12 @@ static SystemHealthState_t health_state = {
     .degraded_sensor_flags = 0
 };
 
+static uint32_t s_sensor_last_log_ms[SENSOR_COUNT] = {0};
+static SensorHealth_t s_sensor_last_logged_status[SENSOR_COUNT] = {0};
+
+#define SENSOR_STATUS_LOG_THROTTLE_MS 5000u
+#define GPS_STATUS_LOG_THROTTLE_MS 30000u
+
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
@@ -29,6 +35,8 @@ static SystemHealthState_t health_state = {
 void SystemHealth_Init(void)
 {
     memset(&health_state, 0, sizeof(health_state));
+    memset(s_sensor_last_log_ms, 0, sizeof(s_sensor_last_log_ms));
+    memset(s_sensor_last_logged_status, 0, sizeof(s_sensor_last_logged_status));
     
     // Initialize all sensors as OK; drivers update this as they initialize and run
     for (int i = 0; i < SENSOR_COUNT; i++) {
@@ -108,10 +116,36 @@ void SystemHealth_SetSensorStatus(SensorName_t sensor, SensorHealth_t status)
     const char *status_names[] = {"OK", "TIMEOUT", "INVALID", "DEGRADED"};
     
     if (old_status != status) {
-        if (status == SENSOR_OK) {
-            printf("[HEALTH] %s: %s (recovered)\r\n", sensor_names[sensor], status_names[status]);
-        } else {
-            printf(ANSI_YELLOW "[HEALTH] %s: %s\r\n" ANSI_RESET "\r\n", sensor_names[sensor], status_names[status]);
+        const uint32_t now_ms = HAL_GetTick();
+        const uint8_t old_was_ok = (old_status == SENSOR_OK);
+        const uint8_t new_is_ok = (status == SENSOR_OK);
+        const uint32_t throttle_ms =
+            (sensor == SENSOR_GPS && status != SENSOR_OK && old_status != SENSOR_OK)
+                ? GPS_STATUS_LOG_THROTTLE_MS
+                : SENSOR_STATUS_LOG_THROTTLE_MS;
+        uint8_t allow_log =
+            new_is_ok ||
+            old_was_ok ||
+            (s_sensor_last_logged_status[sensor] != status) ||
+            ((now_ms - s_sensor_last_log_ms[sensor]) >= throttle_ms);
+
+        if (sensor == SENSOR_GPS && status != SENSOR_OK && old_status != SENSOR_OK) {
+            // GPS can oscillate between TIMEOUT and DEGRADED quickly when signal is unstable.
+            // Treat this as one degraded period and emit at most one log per throttle window.
+            allow_log = (uint8_t)(
+                s_sensor_last_log_ms[sensor] == 0u ||
+                (now_ms - s_sensor_last_log_ms[sensor]) >= throttle_ms
+            );
+        }
+
+        if (allow_log) {
+            if (status == SENSOR_OK) {
+                printf("[HEALTH] %s: %s (recovered)\r\n", sensor_names[sensor], status_names[status]);
+            } else {
+                printf(ANSI_YELLOW "[HEALTH] %s: %s\r\n" ANSI_RESET "\r\n", sensor_names[sensor], status_names[status]);
+            }
+            s_sensor_last_log_ms[sensor] = now_ms;
+            s_sensor_last_logged_status[sensor] = status;
         }
     }
 

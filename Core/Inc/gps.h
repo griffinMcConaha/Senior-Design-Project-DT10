@@ -48,6 +48,11 @@ uint32_t GPS_GetRxByteCount(void);
 // Attempt recovery: reset parser and restart RX if stalled
 uint8_t GPS_CheckAndRecover(void);
 
+// Runtime control for auto-baud behavior.
+// Set to 0 in direct manual mode to prevent unnecessary baud hopping.
+void GPS_SetAutoBaudEnabled(uint8_t enabled);
+uint8_t GPS_GetAutoBaudEnabled(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -87,21 +87,27 @@ void ManualControl_Task(void)
 
     // Optional: Check sensor health periodically (every 1Hz)
     static uint32_t last_health_check = 0;
+    static uint8_t last_logged_imu_ok = 1;
+    static uint8_t last_logged_gps_fix = 1;
     uint32_t now = HAL_GetTick();
 
-    if ((now - last_health_check) >= 1000)
+    if ((now - last_health_check) >= 10000)
     {
-        last_health_check = now;
-
          // Use debounced health state from main loop instead of issuing an
          // extra IMU bus read in manual mode.
          const SystemHealthState_t *hs = SystemHealth_GetState();
-         const char *imu_s = (hs->sensor_status[SENSOR_IMU] == SENSOR_OK) ? "OK" : "FAIL";
+         const uint8_t imu_is_ok = (hs->sensor_status[SENSOR_IMU] == SENSOR_OK) ? 1u : 0u;
+         const char *imu_s = imu_is_ok ? "OK" : "FAIL";
         const GPS_Data_t *gps = GPS_Get();
+        const uint8_t gps_has_fix = gps->has_fix ? 1u : 0u;
 
-        // Log sensor health
-        printf("[RC] Health check - IMU: %s  GPS: %s\r\n",
-             imu_s, gps->has_fix ? "FIX" : "NO_FIX");
+        if (imu_is_ok != last_logged_imu_ok || gps_has_fix != last_logged_gps_fix || last_health_check == 0u) {
+            printf("[RC] Health check - IMU: %s  GPS: %s\r\n",
+                   imu_s, gps_has_fix ? "FIX" : "NO_FIX");
+            last_logged_imu_ok = imu_is_ok;
+            last_logged_gps_fix = gps_has_fix;
+        }
+        last_health_check = now;
 
         // Optional: Detect and report sensor failures
         // Could call: RobotSM_SetFault(&g_sm, FAULT_IMU_TIMEOUT) if imu fails

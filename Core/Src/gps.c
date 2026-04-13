@@ -1,6 +1,7 @@
 #include "gps.h"
 #include "system_health.h"
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -18,9 +19,11 @@
 #define GPS_AUTO_BAUD_ENABLED 1
 #endif
 
-#define GPS_NMEA_SILENT_SWITCH_MS 6000u
-#define GPS_BAUD_SWITCH_COOLDOWN_MS 8000u
-#define GPS_UART_ACTIVE_MS 2000u
+#define GPS_NMEA_SILENT_SWITCH_MS 3500u
+#define GPS_BAUD_SWITCH_COOLDOWN_MS 4000u
+#define GPS_UART_ACTIVE_MS 1200u
+#define GPS_RECOVERY_LOG_THROTTLE_MS 10000u
+#define GPS_AUTO_BAUD_LOG_THROTTLE_MS 15000u
 
 // Module-level UART handle and receive buffer
 static UART_HandleTypeDef *s_huart = NULL;
@@ -44,6 +47,28 @@ static volatile uint32_t s_nmea_unknown_count = 0;
 
 static const uint32_t s_gps_baud_table[] = {9600u, 38400u, 57600u, 115200u};
 static uint8_t s_gps_baud_index = 0;
+static volatile uint8_t s_auto_baud_runtime_enabled = GPS_AUTO_BAUD_ENABLED ? 1u : 0u;
+static uint32_t s_last_recovery_log_ms = 0;
+static uint32_t s_last_auto_baud_log_ms = 0;
+
+static void GPS_LogThrottled(uint32_t *last_log_ms, uint32_t throttle_ms, const char *fmt, ...)
+{
+    if (!last_log_ms || !fmt) {
+        return;
+    }
+
+    uint32_t now_ms = HAL_GetTick();
+    if (*last_log_ms != 0u && (now_ms - *last_log_ms) < throttle_ms) {
+        return;
+    }
+
+    *last_log_ms = now_ms;
+
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+}
 
 static void GPS_UpdateFixState(void)
 {
@@ -61,15 +86,21 @@ static void GPS_SwitchToBaud(uint32_t baud)
     s_huart->Init.BaudRate = baud;
     if (HAL_UART_Init(s_huart) == HAL_OK) {
         (void)HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
-        printf("[GPS] Auto-baud switched to %lu\r\n", (unsigned long)baud);
+        GPS_LogThrottled(&s_last_auto_baud_log_ms, GPS_AUTO_BAUD_LOG_THROTTLE_MS,
+                         "[GPS] Auto-baud switched to %lu\r\n", (unsigned long)baud);
     } else {
-        printf("[GPS] Auto-baud switch failed for %lu\r\n", (unsigned long)baud);
+        GPS_LogThrottled(&s_last_auto_baud_log_ms, GPS_AUTO_BAUD_LOG_THROTTLE_MS,
+                         "[GPS] Auto-baud switch failed for %lu\r\n", (unsigned long)baud);
     }
 }
 
 static void GPS_AutoBaudTick(uint32_t now_ms)
 {
 #if GPS_AUTO_BAUD_ENABLED
+    if (!s_auto_baud_runtime_enabled) {
+        return;
+    }
+
     if (!s_huart) return;
 
     // If valid NMEA lines are arriving recently, keep current baud.
@@ -93,6 +124,16 @@ static void GPS_AutoBaudTick(uint32_t now_ms)
 #else
     (void)now_ms;
 #endif
+}
+
+void GPS_SetAutoBaudEnabled(uint8_t enabled)
+{
+    s_auto_baud_runtime_enabled = enabled ? 1u : 0u;
+}
+
+uint8_t GPS_GetAutoBaudEnabled(void)
+{
+    return s_auto_baud_runtime_enabled;
 }
 
 // Convert NMEA degree-minute format (ddmm.mmmm) to decimal degrees
@@ -437,7 +478,8 @@ void GPS_Reset(void)
     s_rmc_fix_valid = 0;
     s_gga_fix_valid = 0;
     s_gsa_fix_valid = 0;
-    printf("[GPS] Parser reset\r\n");
+    GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                     "[GPS] Parser reset\r\n");
 }
 
 // Get GPS receiver status: 1 if healthy, 0 if not responding
@@ -456,7 +498,8 @@ uint8_t GPS_IsHealthy(void)
 uint8_t GPS_CheckAndRecover(void)
 {
     if (s_huart == NULL) {
-        printf("[GPS] Recovery FAILED: UART not initialized\r\n");
+        GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                         "[GPS] Recovery FAILED: UART not initialized\r\n");
         return 0;
     }
     
@@ -466,7 +509,8 @@ uint8_t GPS_CheckAndRecover(void)
         return 1;
     }
     
-    printf("[GPS] Recovery: Parser stalled, resetting...\r\n");
+    GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                     "[GPS] Recovery: Parser stalled, resetting...\r\n");
     GPS_Reset();
     __HAL_UART_CLEAR_OREFLAG(s_huart);
 
@@ -483,24 +527,31 @@ uint8_t GPS_CheckAndRecover(void)
     HAL_StatusTypeDef status = HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
     if (status == HAL_OK || status == HAL_BUSY) {
         if (status == HAL_OK) {
-            printf("[GPS] Recovery: RX interrupt re-enabled\r\n");
+            GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                             "[GPS] Recovery: RX interrupt re-enabled\r\n");
         } else {
-            printf("[GPS] Recovery: RX already armed\r\n");
+            GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                             "[GPS] Recovery: RX already armed\r\n");
         }
         return 1;
     } else {
-        printf("[GPS] Recovery: RX re-arm failed (%d), reinitializing UART...\r\n", status);
+        GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                         "[GPS] Recovery: RX re-arm failed (%d), reinitializing UART...\r\n", status);
         (void)HAL_UART_DeInit(s_huart);
         if (HAL_UART_Init(s_huart) == HAL_OK) {
             HAL_StatusTypeDef retry = HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
             if (retry == HAL_OK || retry == HAL_BUSY) {
-                printf("[GPS] Recovery: UART reinitialized\r\n");
+                GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                                 "[GPS] Recovery: UART reinitialized\r\n");
                 return 1;
             }
-            printf("[GPS] Recovery FAILED: UART reinit done but RX re-arm failed (%d)\r\n", retry);
+            GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                             "[GPS] Recovery FAILED: UART reinit done but RX re-arm failed (%d)\r\n", retry);
             return 0;
         }
-        printf("[GPS] Recovery FAILED: UART reinit failed\r\n");
+        GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
+                         "[GPS] Recovery FAILED: UART reinit failed\r\n");
         return 0;
     }
 }
+

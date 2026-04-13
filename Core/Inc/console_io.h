@@ -54,6 +54,9 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm);
 /** @brief Check if ESC key was pressed (for exiting continuous tests) */
 uint8_t Console_CheckEscPressed(void);
 
+/** @brief Timestamp of the most recent console input byte (HAL_GetTick ms) */
+uint32_t Console_GetLastInputMs(void);
+
 /** @brief Process serial command and update robot state if valid */
 void Console_ProcessCommand(const char *cmd, RobotSM_t *sm);
 
@@ -64,3 +67,4 @@ void Console_SendSafeState(void);
 void Console_ShowTestMenu(void);
 
 #endif // CONSOLE_IO_H
+

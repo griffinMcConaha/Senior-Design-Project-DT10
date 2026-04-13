@@ -504,6 +504,7 @@ static uint16_t console_input_idx = 0;
 static volatile uint8_t *s_test_mode_flag = NULL;
 static volatile uint8_t s_esc_pressed = 0;
 static uint8_t s_console_ignore_lf_after_cr = 0;
+static volatile uint32_t s_console_last_input_ms = 0;
 
 // ANSI sequence state machine: filter out escape sequences from terminal noise
 static volatile uint8_t s_ansi_state = 0;  // 0: normal, 1: saw ESC, 2: saw ESC+[, 3: in param
@@ -557,6 +558,7 @@ static int Console_ReadLineBlocking(const char *prompt, char *out, size_t out_si
 
         if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
             uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
 
             if (ch == 0x1B) {
                 Console_ForceAllOutputsOff("ESC");
@@ -605,7 +607,13 @@ static void Console_SendLoRaExampleCommands(void)
 {
     static const char *examples[] = {
         "CMD:MANUAL",
-        "CMD:AUTO,SALT:25,BRINE:75",
+        "RESET",
+        "FORWARD",
+        "DRIVE,THROTTLE:35,TURN:0",
+        "TEST SALT 50",
+        "AGITATOR ON",
+        "RELAY ON",
+        "ALLON",
         "CMD:PAUSE",
         "CMD:ESTOP"
     };
@@ -615,9 +623,26 @@ static void Console_SendLoRaExampleCommands(void)
         Console_WatchdogKick();
         LoRA_SendRaw(examples[i]);
         printf("[DIAG] LoRa example TX: %s\r\n", examples[i]);
-        HAL_Delay(200);
+        HAL_Delay(120);
     }
     printf(ANSI_GREEN "[DIAG] LoRa example command sequence complete\r\n" ANSI_RESET);
+}
+
+static void Console_SendLoRaCommandAndReport(const char *text)
+{
+    if (!text || text[0] == '\0') {
+        printf("[DIAG] Usage: LORA <text>\r\n");
+        return;
+    }
+
+    uint32_t tx_before = LoRA_GetTxCount();
+    LoRA_SendRaw(text);
+    uint32_t tx_after = LoRA_GetTxCount();
+    if (tx_after > tx_before) {
+        printf("[DIAG] LoRa TX OK: %s\r\n", text);
+    } else {
+        printf("[DIAG] LoRa TX FAILED (UART5 not ready?)\r\n");
+    }
 }
 
 static int Console_IsLikelySbEspFrame(const char *s)
@@ -735,7 +760,7 @@ static void Console_SendSbEspCommandAndReport(const char *input)
 
     Dispersion_SetTestResponseMode(1);
     Dispersion_SendRaw(normalized);
-    HAL_Delay(400);
+    HAL_Delay(150);
 
     const char *after = Dispersion_GetLastStatus();
     if (after && after[0] != '\0') {
@@ -911,7 +936,7 @@ void Console_ShowTestMenu(void)
     printf(ANSI_BOLD ANSI_BLUE "\r\n[LoRa / Links]\r\n" ANSI_RESET);
     printf("  L. TEST LORA SEND    - Type and send raw LoRa string\r\n");
     printf("  R. TEST LORA RX      - Monitor incoming LoRa messages\r\n");
-    printf("  X. TEST LORACMDS     - Send example LoRa control set\r\n");
+        printf("  TEST LORACMDS                   - Send expanded LoRa control command set\r\n");
 
     printf(ANSI_BOLD ANSI_YELLOW "\r\n[System]\r\n" ANSI_RESET);
     printf("  T. Show this test menu\r\n");
@@ -944,6 +969,11 @@ uint8_t Console_CheckEscPressed(void)
 }
 
 // Call this from USART2 RX interrupt handler or polling loop to accumulate input
+
+uint32_t Console_GetLastInputMs(void)
+{
+    return s_console_last_input_ms;
+}
 void Console_RxByte(uint8_t byte, RobotSM_t *sm)
 {
     const uint8_t in_test_mode = (s_test_mode_flag && (*s_test_mode_flag != 0)) ? 1u : 0u;
@@ -1083,6 +1113,8 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm)
         return;
     }
 
+    s_console_last_input_ms = HAL_GetTick();
+
     // Printable characters
     if (byte >= 32 && byte < 127 && console_input_idx < sizeof(console_input_buf) - 1) {
         console_input_buf[console_input_idx++] = (char)byte;
@@ -1122,6 +1154,18 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     {
         if (s_test_mode_flag) *s_test_mode_flag = 1;
         Console_ApplyFullActivationPreset();
+        return;
+    }
+
+    if (strncmp(cmd_upper, "LORA ", 5) == 0 || strncmp(cmd_upper, "REMOTE ", 7) == 0 || strncmp(cmd_upper, "APPCMD ", 7) == 0)
+    {
+        const char *payload_orig = cmd_clean;
+        if (strncmp(cmd_upper, "LORA ", 5) == 0) {
+            payload_orig = Console_SkipCommandDelims(cmd_clean + 4);
+        } else {
+            payload_orig = Console_SkipCommandDelims(cmd_clean + 6);
+        }
+        Console_SendLoRaCommandAndReport(payload_orig);
         return;
     }
 
@@ -1244,6 +1288,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             Console_WatchdogKick();
             if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                 uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
                 if (ch == 0x1B) {
                     Console_ForceAllOutputsOff("ESC");
                     break;
@@ -1454,6 +1499,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             Console_WatchdogKick();
             if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                 uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
                 if (ch == 0x1B) break;
             }
             if (Console_CheckEscPressed()) break;
@@ -1538,6 +1584,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
                     if (ch == 0x1B) {
                         Console_ForceAllOutputsOff("ESC");
                         printf("\r\n[DIAG] Polling stopped\r\n");
@@ -1606,6 +1653,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             Console_WatchdogKick();
             if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                 uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
                 if (ch == 0x1B) {
                     Console_ForceAllOutputsOff("ESC");
                     break;
@@ -1662,7 +1710,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 snprintf(ag_cmd, sizeof(ag_cmd), "AGITATOR %s", ag_input);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(ag_cmd);
-                HAL_Delay(400);
+                HAL_Delay(150);
                 const char *resp = Dispersion_GetLastStatus();
                 if (resp && resp[0] != '\0') {
                     printf("[DIAG] SB-ESP RX: %s\r\n", resp);
@@ -1694,7 +1742,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 snprintf(th_cmd, sizeof(th_cmd), "THROWER %s", th_input);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(th_cmd);
-                HAL_Delay(400);
+                HAL_Delay(150);
                 const char *resp = Dispersion_GetLastStatus();
                 if (resp && resp[0] != '\0') {
                     printf("[DIAG] SB-ESP RX: %s\r\n", resp);
@@ -1726,7 +1774,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 snprintf(relay_cmd, sizeof(relay_cmd), "RELAY %s", relay_input);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(relay_cmd);
-                HAL_Delay(400);
+                HAL_Delay(150);
                 const char *resp = Dispersion_GetLastStatus();
                 if (resp && resp[0] != '\0') {
                     printf("[DIAG] SB-ESP RX: %s\r\n", resp);
@@ -1765,9 +1813,9 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         printf("  TEST CONTROL                    - Open mixed motor + SB-ESP shell\r\n");
         printf("  TEST SBESP <text>               - Send raw Salt-Brine ESP32 string\r\n");
         printf("  TEST SBESPRX                    - Monitor Salt-Brine ESP32 messages\r\n");
-        printf("  TEST LORA <text>                - Send raw LoRa string to ESP32\r\n");
+        printf("  TEST LORA <text>                - Send raw LoRa string to ESP32 (alias: LORA <text> / REMOTE <text>)\r\n");
         printf("  TEST LORARX                     - Monitor incoming LoRa messages\r\n");
-        printf("  TEST LORACMDS                   - Send example LoRa control command set\r\n");
+        printf("  TEST LORACMDS                   - Send expanded LoRa control command set\r\n");
         printf("\r\n" ANSI_YELLOW "Other Commands:\r\n" ANSI_RESET);
         printf("  T                               - Show test menu\r\n");
         printf("  EXIT                            - Exit test mode\r\n");
@@ -1999,7 +2047,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 snprintf(ag_cmd, sizeof(ag_cmd), "AGITATOR %s", ag_arg);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(ag_cmd);
-                HAL_Delay(400);
+                HAL_Delay(150);
                 const char *resp = Dispersion_GetLastStatus();
                 if (resp && resp[0] != '\0') {
                     printf("[DIAG] SB-ESP RX: %s\r\n", resp);
@@ -2020,7 +2068,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 snprintf(th_cmd, sizeof(th_cmd), "THROWER %s", th_arg);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(th_cmd);
-                HAL_Delay(400);
+                HAL_Delay(150);
                 const char *resp = Dispersion_GetLastStatus();
                 if (resp && resp[0] != '\0') {
                     printf("[DIAG] SB-ESP RX: %s\r\n", resp);
@@ -2041,7 +2089,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 snprintf(relay_cmd, sizeof(relay_cmd), "RELAY %s", relay_arg);
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(relay_cmd);
-                HAL_Delay(400);
+                HAL_Delay(150);
                 const char *resp = Dispersion_GetLastStatus();
                 if (resp && resp[0] != '\0') {
                     printf("[DIAG] SB-ESP RX: %s\r\n", resp);
@@ -2098,7 +2146,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 
                 Dispersion_SetTestResponseMode(1);
                 Dispersion_SendRaw(normalized_sb_text);
-                HAL_Delay(250);
+                HAL_Delay(100);
                 const char *after = Dispersion_GetLastStatus();
                 if (after && strcmp(after, before_buf) != 0) {
                     if ((strncmp(after, "STATUS:", 7) == 0) || (strncmp(after, "FLOW:", 5) == 0)) {
@@ -2127,6 +2175,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 Console_WatchdogKick();
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
                     if (ch == 0x1B) {
                         Console_ForceAllOutputsOff("ESC");
                         break;
@@ -2167,7 +2216,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             return;
         }
 
-        // TEST LORACMDS
+        printf("  TEST LORACMDS                   - Send expanded LoRa control command set\r\n");
         if (strcmp(subcmd_up, "LORACMDS") == 0)
         {
             Console_SendLoRaExampleCommands();
@@ -2209,6 +2258,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 Console_WatchdogKick();
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
                     if (ch == 0x1B) {
                         Console_ForceAllOutputsOff("ESC");
                         break;
@@ -2272,6 +2322,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 Console_WatchdogKick();
                 if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE)) {
                     uint8_t ch = (uint8_t)(huart2.Instance->DR & 0xFF);
+            s_console_last_input_ms = HAL_GetTick();
                     if (ch == 0x1B) {
                         Console_ForceAllOutputsOff("ESC");
                         break;
@@ -2351,9 +2402,9 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         printf("  TEST BRINESWEEP [delay_ms]   - Sweep brine 0-100%%\r\n");
         printf("  TEST SBESP <text>            - Send raw Salt-Brine ESP32 string (alias: TEST DISP)\r\n");
         printf("  TEST SBESPRX                 - Monitor Salt-Brine ESP32 messages (alias: TEST DISPRX)\r\n");
-        printf("  TEST LORA <text>             - Send raw LoRa string to ESP32\r\n");
+        printf("  TEST LORA <text>                - Send raw LoRa string to ESP32 (alias: LORA <text> / REMOTE <text>)\r\n");
         printf("  TEST LORARX                  - Monitor incoming LoRa messages\r\n");
-        printf("  TEST LORACMDS                - Send example LoRa control command set\r\n");
+        printf("  TEST LORACMDS                   - Send expanded LoRa control command set\r\n");
         printf("  TEST GPS                     - Read GPS data\r\n");
         printf("  TEST IMU                     - Read IMU data\r\n");
         printf("  TEST IMUDETAIL               - Detailed IMU I2C check\r\n");
@@ -2404,3 +2455,5 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     printf(ANSI_YELLOW "[DIAG] Unrecognized command: %s\r\n" ANSI_RESET, cmd_clean);
     printf("[DIAG] Try: TEST MOTOR 1 30  (or type HELP)\r\n");
 }
+
+
