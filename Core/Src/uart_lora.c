@@ -15,11 +15,11 @@
 // ============================================================================
 
 #define LORA_RX_BUFFER_SIZE 256
-#define LORA_COMMAND_TIMEOUT_MS 5000
+#define LORA_COMMAND_TIMEOUT_MS 2500
 #define LORA_STREAM_BUFFER_SIZE 512
 #define LORA_ISR_QUEUE_SIZE 512
 #define LORA_TX_DIAGNOSTICS_ENABLED 1
-#define LORA_UART_TX_TIMEOUT_MS 40
+#define LORA_UART_TX_TIMEOUT_MS 20
 #define LORA_TX_FAIL_TIMEOUT_STREAK 5u
 #define LORA_HEALTH_INACTIVE_MS 45000u
 #define LORA_HEALTH_STALE_TICKS_TO_TIMEOUT 5u
@@ -45,6 +45,8 @@ typedef struct {
     uint8_t manual_command_valid;
     int8_t manual_drive_pct;
     int8_t manual_turn_pct;
+    uint32_t manual_seq;
+    uint8_t manual_seq_valid;
     uint8_t command_valid;
     uint32_t invalid_command_count;
     uint32_t start_filter_drop_count;
@@ -164,6 +166,95 @@ static uint8_t lora_parse_percent_field(const char *payload, const char *key, in
     return 1;
 }
 
+static uint8_t lora_parse_compact_drive(const char *payload, int8_t *out_drive, int8_t *out_turn)
+{
+    if (!payload || !out_drive || !out_turn) return 0;
+    if (!(payload[0] == 'D' && payload[1] == ':')) return 0;
+
+    char *endptr = NULL;
+    long drive = strtol(payload + 2, &endptr, 10);
+    if (endptr == (payload + 2) || !endptr || *endptr != ',') return 0;
+
+    long turn = strtol(endptr + 1, &endptr, 10);
+    if (!endptr) return 0;
+
+    while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+        endptr++;
+    }
+
+    if (*endptr == ',') {
+        endptr++;
+        while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+            endptr++;
+        }
+
+        if (*endptr == 'S') {
+            endptr++;
+            while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+                endptr++;
+            }
+            if (*endptr != ':') return 0;
+            endptr++;
+
+            char *seq_endptr = NULL;
+            (void)strtol(endptr, &seq_endptr, 10);
+            if (!seq_endptr || seq_endptr == endptr) return 0;
+            endptr = seq_endptr;
+        } else {
+            return 0;
+        }
+    }
+
+    while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+        endptr++;
+    }
+    if (*endptr != '\0') return 0;
+
+    *out_drive = lora_clamp_percent((int)drive);
+    *out_turn = lora_clamp_percent((int)turn);
+    return 1;
+}
+
+static uint8_t lora_parse_compact_manual_packet(const char *payload, uint32_t *out_seq, int8_t *out_drive, int8_t *out_turn)
+{
+    if (!payload || !out_seq || !out_drive || !out_turn) return 0;
+    if (!(payload[0] == 'J' && payload[1] == ':')) return 0;
+
+    char *endptr = NULL;
+    unsigned long seq = strtoul(payload + 2, &endptr, 10);
+    if (endptr == (payload + 2) || !endptr || *endptr != ',') return 0;
+
+    long drive = strtol(endptr + 1, &endptr, 10);
+    if (!endptr || *endptr != ',') return 0;
+
+    long turn = strtol(endptr + 1, &endptr, 10);
+    if (!endptr) return 0;
+
+    while (*endptr != '\0' && isspace((unsigned char)*endptr)) {
+        endptr++;
+    }
+    if (*endptr != '\0') return 0;
+
+    *out_seq = (uint32_t)seq;
+    *out_drive = lora_clamp_percent((int)drive);
+    *out_turn = lora_clamp_percent((int)turn);
+    return 1;
+}
+
+static uint8_t lora_manual_seq_is_newer(uint32_t next_seq)
+{
+    if (!lora_state.manual_seq_valid) {
+        return 1;
+    }
+    if (next_seq == lora_state.manual_seq) {
+        return 0;
+    }
+    if (next_seq > lora_state.manual_seq) {
+        return 1;
+    }
+    return (uint32_t)(lora_state.manual_seq - next_seq) > 1000000u;
+}
+
 static Waypoint_t s_lora_wp_buf[MAX_WAYPOINTS];
 static uint8_t s_lora_wp_count = 0;
 extern RobotSM_t g_sm;
@@ -210,23 +301,23 @@ static uint8_t lora_parse_state_request(const char *cmd, uint8_t *out_state)
         *comma = '\0';
     }
 
-    if (strcmp(payload, LORA_CMD_AUTO) == 0) {
+    if (strcmp(payload, "A") == 0 || strcmp(payload, LORA_CMD_AUTO) == 0) {
         *out_state = STATE_AUTO;
         return 1;
     }
-    if (strcmp(payload, LORA_CMD_MANUAL) == 0) {
+    if (strcmp(payload, "M") == 0 || strcmp(payload, LORA_CMD_MANUAL) == 0) {
         *out_state = STATE_MANUAL;
         return 1;
     }
-    if (strcmp(payload, LORA_CMD_PAUSE) == 0) {
+    if (strcmp(payload, "P") == 0 || strcmp(payload, LORA_CMD_PAUSE) == 0) {
         *out_state = STATE_PAUSE;
         return 1;
     }
-    if (strcmp(payload, LORA_CMD_ESTOP) == 0) {
+    if (strcmp(payload, "E") == 0 || strcmp(payload, LORA_CMD_ESTOP) == 0) {
         *out_state = STATE_ESTOP;
         return 1;
     }
-    if (strcmp(payload, LORA_CMD_RESET) == 0) {
+    if (strcmp(payload, "X") == 0 || strcmp(payload, LORA_CMD_RESET) == 0) {
         return 2;
     }
 
@@ -282,27 +373,111 @@ static uint8_t lora_parse_manual_request(const char *cmd, LoRA_ManualCommand_t *
         }
     }
 
-    if (strcmp(payload, "FORWARD") == 0) {
+    {
+        uint32_t manual_seq = 0;
+        int8_t drive_pct = 0;
+        int8_t turn_pct = 0;
+        if (lora_parse_compact_manual_packet(payload, &manual_seq, &drive_pct, &turn_pct)) {
+            if (!lora_manual_seq_is_newer(manual_seq)) {
+                return 0;
+            }
+            lora_state.manual_seq = manual_seq;
+            lora_state.manual_seq_valid = 1;
+            lora_state.manual_drive_pct = drive_pct;
+            lora_state.manual_turn_pct = turn_pct;
+            *out_cmd = LORA_MANUAL_CMD_DRIVE;
+            return 1;
+        }
+    }
+
+    {
+        int8_t drive_pct = 0;
+        int8_t turn_pct = 0;
+        if (lora_parse_compact_drive(payload, &drive_pct, &turn_pct)) {
+            lora_state.manual_drive_pct = drive_pct;
+            lora_state.manual_turn_pct = turn_pct;
+            *out_cmd = LORA_MANUAL_CMD_DRIVE;
+            return 1;
+        }
+    }
+
+    if (strcmp(payload, "F") == 0 || strcmp(payload, "FORWARD") == 0) {
         *out_cmd = LORA_MANUAL_CMD_FORWARD;
         return 1;
     }
-    if (strcmp(payload, "BACK") == 0 || strcmp(payload, "BACKWARD") == 0) {
+    if (strcmp(payload, "B") == 0 || strcmp(payload, "BACK") == 0 || strcmp(payload, "BACKWARD") == 0) {
         *out_cmd = LORA_MANUAL_CMD_BACK;
         return 1;
     }
-    if (strcmp(payload, "LEFT") == 0) {
+    if (strcmp(payload, "L") == 0 || strcmp(payload, "LEFT") == 0) {
         *out_cmd = LORA_MANUAL_CMD_LEFT;
         return 1;
     }
-    if (strcmp(payload, "RIGHT") == 0) {
+    if (strcmp(payload, "R") == 0 || strcmp(payload, "RIGHT") == 0) {
         *out_cmd = LORA_MANUAL_CMD_RIGHT;
         return 1;
     }
-    if (strcmp(payload, "STOP") == 0) {
+    if (strcmp(payload, "S") == 0 || strcmp(payload, "STOP") == 0) {
         *out_cmd = LORA_MANUAL_CMD_STOP;
         return 1;
     }
 
+    if (strcmp(payload, "ALLON") == 0 || strcmp(payload, "FULLON") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_ALL_ON;
+        return 1;
+    }
+    if (strcmp(payload, "AGITATOR ON") == 0 || strcmp(payload, "TEST AGITATOR ON") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_AGITATOR_ON;
+        return 1;
+    }
+    if (strcmp(payload, "AGITATOR OFF") == 0 || strcmp(payload, "TEST AGITATOR OFF") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_AGITATOR_OFF;
+        return 1;
+    }
+    if (strcmp(payload, "THROWER ON") == 0 || strcmp(payload, "TEST THROWER ON") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_THROWER_ON;
+        return 1;
+    }
+    if (strcmp(payload, "THROWER OFF") == 0 || strcmp(payload, "TEST THROWER OFF") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_THROWER_OFF;
+        return 1;
+    }
+    if (strcmp(payload, "RELAY ON") == 0 || strcmp(payload, "TEST RELAY ON") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_RELAY_ON;
+        return 1;
+    }
+    if (strcmp(payload, "RELAY OFF") == 0 || strcmp(payload, "TEST RELAY OFF") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_RELAY_OFF;
+        return 1;
+    }
+    if (strncmp(payload, "TEST SALT", 9) == 0) {
+        int8_t salt_pct = 50;
+        const char *pct = payload + 9;
+        while (*pct == ' ') pct++;
+        if (*pct != '\0') {
+            salt_pct = (int8_t)atoi(pct);
+        }
+        if (salt_pct < 0) salt_pct = 0;
+        if (salt_pct > 100) salt_pct = 100;
+        lora_state.manual_drive_pct = salt_pct;
+        lora_state.manual_turn_pct = 0;
+        *out_cmd = LORA_MANUAL_CMD_TEST_SALT;
+        return 1;
+    }
+    if (strncmp(payload, "TEST BRINE", 10) == 0) {
+        int8_t brine_pct = 50;
+        const char *pct = payload + 10;
+        while (*pct == ' ') pct++;
+        if (*pct != '\0') {
+            brine_pct = (int8_t)atoi(pct);
+        }
+        if (brine_pct < 0) brine_pct = 0;
+        if (brine_pct > 100) brine_pct = 100;
+        lora_state.manual_drive_pct = 0;
+        lora_state.manual_turn_pct = brine_pct;
+        *out_cmd = LORA_MANUAL_CMD_TEST_BRINE;
+        return 1;
+    }
     // Basic JSON compatibility for upcoming app payloads
     if (payload[0] == '{') {
         int8_t drive_pct = 0;
@@ -345,6 +520,122 @@ static uint8_t lora_parse_manual_request(const char *cmd, LoRA_ManualCommand_t *
         }
     }
 
+    return 0;
+}
+
+static uint8_t lora_accept_command_text(const char *cmd)
+{
+    if (!cmd || !cmd[0]) return 0;
+
+    lora_state.command_valid = 0;
+    lora_state.manual_command_valid = 0;
+
+    uint8_t parsed_state_cmd = lora_parse_state_request(cmd, &lora_state.pending_state_request);
+    if (parsed_state_cmd == 1)
+    {
+        lora_state.command_valid = 1;
+        strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+        lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        if (s_lora_verbose) {
+            printf("[LORA] Valid command: %s -> state=%u\r\n", cmd, lora_state.pending_state_request);
+        }
+        return 1;
+    }
+    else if (parsed_state_cmd == 2)
+    {
+        lora_state.pending_reset_request = 1;
+        strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+        lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        if (s_lora_verbose) {
+            printf("[LORA] Valid reset request: %s\r\n", cmd);
+        }
+        return 1;
+    }
+    else if (lora_parse_manual_request(cmd, &lora_state.pending_manual_cmd))
+    {
+        lora_state.manual_command_valid = 1;
+        strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+        lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        if (s_lora_verbose) {
+            printf("[LORA] Valid manual command: %s -> cmd=%u\r\n", cmd, (unsigned)lora_state.pending_manual_cmd);
+        }
+        return 1;
+    }
+    else if (strcmp(cmd, LORA_WP_CLEAR) == 0)
+    {
+        memset(s_lora_wp_buf, 0, sizeof(s_lora_wp_buf));
+        s_lora_wp_count = 0;
+        Mission_ClearCurrent();
+        Mission_ClearPersisted();
+        strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+        lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        LoRA_SendRaw(LORA_WP_ACK_CLEAR);
+        if (s_lora_verbose) {
+            printf("[LORA] Cleared staged waypoint set\r\n");
+        }
+        return 1;
+    }
+    else if (strncmp(cmd, LORA_WP_ADD_PREFIX ":", 3) == 0)
+    {
+        uint8_t idx = 0;
+        float lat = 0.0f;
+        float lon = 0.0f;
+        int salt_pct = 0;
+        int brine_pct = 0;
+
+        if (sscanf(cmd + 3, "%hhu:%f,%f,%d,%d", &idx, &lat, &lon, &salt_pct, &brine_pct) == 5 && idx < MAX_WAYPOINTS)
+        {
+            char ack[24];
+
+            if (salt_pct < 0) salt_pct = 0;
+            if (salt_pct > 100) salt_pct = 100;
+            if (brine_pct < 0) brine_pct = 0;
+            if (brine_pct > 100) brine_pct = 100;
+
+            s_lora_wp_buf[idx].latitude = lat;
+            s_lora_wp_buf[idx].longitude = lon;
+            s_lora_wp_buf[idx].salt_rate = (float)salt_pct / 100.0f;
+            s_lora_wp_buf[idx].brine_rate = (float)brine_pct / 100.0f;
+            if ((uint8_t)(idx + 1) > s_lora_wp_count) {
+                s_lora_wp_count = (uint8_t)(idx + 1);
+            }
+
+            Mission_AddWaypoint(lat, lon, (uint8_t)salt_pct, (uint8_t)brine_pct);
+
+            strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+            lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+            snprintf(ack, sizeof(ack), "%s:%hhu", LORA_WP_ACK_ADD_PREFIX, idx);
+            LoRA_SendRaw(ack);
+            if (s_lora_verbose) {
+                printf("[LORA] Staged waypoint %u lat=%.6f lon=%.6f salt=%d brine=%d\r\n",
+                       idx, lat, lon, salt_pct, brine_pct);
+            }
+            return 1;
+        }
+    }
+    else if (strncmp(cmd, LORA_WP_LOAD_PREFIX ":", 7) == 0)
+    {
+        uint8_t count = 0;
+        if (sscanf(cmd + 7, "%hhu", &count) == 1 && count > 0 && count == s_lora_wp_count)
+        {
+            char ack[28];
+
+            RobotSM_LoadMission(&g_sm, s_lora_wp_buf, s_lora_wp_count);
+            strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+            lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+            snprintf(ack, sizeof(ack), "%s:%hhu", LORA_WP_ACK_LOAD_PREFIX, count);
+            LoRA_SendRaw(ack);
+            if (s_lora_verbose) {
+                printf("[LORA] Loaded %u staged waypoints into mission state\r\n", count);
+            }
+            return 1;
+        }
+    }
+
+    lora_state.invalid_command_count++;
+    if (s_lora_verbose) {
+        printf("[LORA] Invalid command: %s\r\n", cmd);
+    }
     return 0;
 }
 
@@ -412,7 +703,39 @@ static const char* lora_unwrap_stream_frame(char *msg, uint32_t *out_seq, uint8_
     return endptr + 1;
 }
 
-// Initialize LoRA UART interface (UART5, 115200 baud)
+uint8_t LoRA_InjectCommandText(const char *text)
+{
+    if (!text) return 0;
+
+    char normalized[LORA_RX_BUFFER_SIZE];
+    size_t in_len = strlen(text);
+    while (in_len > 0 && (text[in_len - 1] == '\r' || text[in_len - 1] == '\n')) {
+        in_len--;
+    }
+    while (*text == ' ' || *text == '\t') {
+        text++;
+    }
+    while (in_len > 0 && (text[in_len - 1] == ' ' || text[in_len - 1] == '\t')) {
+        in_len--;
+    }
+    if (in_len == 0) return 0;
+    if (in_len >= sizeof(normalized)) {
+        in_len = sizeof(normalized) - 1;
+    }
+
+    memcpy(normalized, text, in_len);
+    normalized[in_len] = '\0';
+
+    strncpy(lora_state.last_raw_frame, normalized, sizeof(lora_state.last_raw_frame) - 1);
+    lora_state.last_raw_frame[sizeof(lora_state.last_raw_frame) - 1] = '\0';
+    lora_state.raw_frame_count++;
+    lora_state.last_rx_ms = HAL_GetTick();
+    lora_state.rx_count++;
+
+    return lora_accept_command_text(normalized);
+}
+
+// Initialize LoRA UART interface (UART5, 921600 baud)
 void LoRA_Init(UART_HandleTypeDef *huart5)
 {
     if (!huart5) return;
@@ -431,6 +754,8 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.manual_command_valid = 0;
     lora_state.manual_drive_pct = 0;
     lora_state.manual_turn_pct = 0;
+    lora_state.manual_seq = 0;
+    lora_state.manual_seq_valid = 0;
     lora_state.invalid_command_count = 0;
     lora_state.start_filter_drop_count = 0;
     lora_state.prefix_reject_count = 0;
@@ -453,7 +778,7 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     memset(lora_state.isr_q, 0, sizeof(lora_state.isr_q));
 
     if (s_lora_verbose) {
-        printf("[LORA] LoRA module initialized on UART5 (115200 baud)\r\n");
+        printf("[LORA] LoRA module initialized on UART5 (921600 baud)\r\n");
     }
 }
 
@@ -774,11 +1099,11 @@ void LoRA_SendState(uint8_t state, float gps_lat, float gps_lon,
 {
     if (!lora_state.huart) return;
 
-    // JSON format: {"state":"MODE","gps":{"lat":0.0,"lon":0.0},"motor":{"m1":0,"m2":0}}
-    char msg[160];
+    float approx_speed = (float)abs((motor_m1 + motor_m2) / 2) / 100.0f;
+    char msg[96];
     snprintf(msg, sizeof(msg),
-             "{\"state\":\"%s\",\"gps\":{\"lat\":%.4f,\"lon\":%.4f},\"motor\":{\"m1\":%d,\"m2\":%d}}\r\n",
-             lora_state_name(state), gps_lat, gps_lon, motor_m1, motor_m2);
+             "S:%s,%.4f,%.4f,0.0,%.2f,0,0.0,0\r\n",
+             lora_state_name(state), gps_lat, gps_lon, approx_speed);
 
     lora_uart5_send(msg, "state");
 }
@@ -795,16 +1120,13 @@ void LoRA_SendManualTelemetry(int motor_m1, int motor_m2,
     const uint8_t lora_ok = (SystemHealth_GetSensorStatus(SENSOR_LORA) == SENSOR_OK) ? 1u : 0u;
     const uint8_t degraded = (imu_ok && gps_ok && lora_ok) ? 0u : 1u;
 
-    // Compact JSON: ~80 bytes on the wire — fast to transmit over LoRa.
-    // "s" = state (always MANUAL here), "m1"/"m2" = motor %, "h" = heading,
-    // "pl"/"pr" = proximity cm (9999 = no detection).
-    // "imu"/"gps"/"lora" = health flags, "deg" = any degraded sensor.
-    char msg[160];
+    (void)prox_left_cm;
+    (void)prox_right_cm;
+
+    char msg[72];
     snprintf(msg, sizeof(msg),
-             "{\"s\":\"MANUAL\",\"m1\":%d,\"m2\":%d,\"h\":%.1f,\"pl\":%u,\"pr\":%u,\"imu\":%u,\"gps\":%u,\"lora\":%u,\"deg\":%u}\r\n",
-             motor_m1, motor_m2, yaw_deg,
-             (prox_left_cm  == 65535u) ? 9999u : (unsigned)prox_left_cm,
-             (prox_right_cm == 65535u) ? 9999u : (unsigned)prox_right_cm,
+             "M:%.1f,%d,%d,%u,%u,%u,%u\r\n",
+             yaw_deg, motor_m1, motor_m2,
              (unsigned)imu_ok, (unsigned)gps_ok, (unsigned)lora_ok, (unsigned)degraded);
 
     lora_uart5_send(msg, "manual");
@@ -819,26 +1141,17 @@ void LoRA_SendTelemetry(uint8_t state, float gps_lat, float gps_lon, uint8_t gps
 {
     if (!lora_state.huart) return;
 
-    char prox_left_json[20];
-    char prox_right_json[20];
-    if (prox_left_cm == 65535u) {
-        strcpy(prox_left_json, "\"NO_DETECT\"");
-    } else {
-        snprintf(prox_left_json, sizeof(prox_left_json), "%u", prox_left_cm);
-    }
-    if (prox_right_cm == 65535u) {
-        strcpy(prox_right_json, "\"NO_DETECT\"");
-    } else {
-        snprintf(prox_right_json, sizeof(prox_right_json), "%u", prox_right_cm);
-    }
+    (void)pitch_deg;
+    (void)temp_c;
+    (void)prox_left_cm;
+    (void)prox_right_cm;
 
-    // JSON format with proximity sensors plus an uptime heartbeat for easier tracing
-    char msg[384];
+    float approx_speed = (float)abs((motor_m1 + motor_m2) / 2) / 100.0f;
+    char msg[128];
     snprintf(msg, sizeof(msg),
-             "{\"state\":\"%s\",\"uptime_ms\":%lu,\"gps\":{\"lat\":%.4f,\"lon\":%.4f,\"fix\":%u,\"sat\":%u,\"hdop\":%.1f},\"motor\":{\"m1\":%d,\"m2\":%d},\"heading\":{\"yaw\":%.1f,\"pitch\":%.1f},\"disp\":{\"salt\":%u,\"brine\":%u},\"temp\":%.1f,\"prox\":{\"left\":%s,\"right\":%s}}\r\n",
-             lora_state_name(state), (unsigned long)HAL_GetTick(), gps_lat, gps_lon, gps_has_fix, gps_num_sat, gps_hdop,
-             motor_m1, motor_m2, yaw_deg, pitch_deg, salt_rate, brine_rate, temp_c,
-             prox_left_json, prox_right_json);
+             "T:%s,%.4f,%.4f,%.1f,%.2f,%u,%.1f,%u,%d,%d,%u,%u\r\n",
+             lora_state_name(state), gps_lat, gps_lon, yaw_deg, approx_speed,
+             gps_has_fix, gps_hdop, gps_num_sat, motor_m1, motor_m2, salt_rate, brine_rate);
 
     lora_uart5_send(msg, "telemetry");
 }
@@ -870,9 +1183,8 @@ void LoRA_SendFault(uint8_t fault_code, uint8_t action)
         case 2: action_name = "LOG_ONLY"; break;
     }
 
-    // JSON format: {"fault":"IMU_TIMEOUT","action":"ESTOP"}
-    char msg[96];
-    snprintf(msg, sizeof(msg), "{\"fault\":\"%s\",\"action\":\"%s\"}\r\n", fault_name, action_name);
+    char msg[64];
+    snprintf(msg, sizeof(msg), "F:%s,%s\r\n", fault_name, action_name);
 
     lora_uart5_send(msg, "fault");
 }
@@ -1040,3 +1352,6 @@ uint32_t LoRA_GetIsrQueueOverflowCount(void)
 {
     return lora_state.isr_q_overflow_count;
 }
+
+
+

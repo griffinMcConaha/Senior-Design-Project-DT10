@@ -15,10 +15,19 @@ typedef enum {
     LORA_MANUAL_CMD_LEFT,
     LORA_MANUAL_CMD_RIGHT,
     LORA_MANUAL_CMD_DRIVE,
-    LORA_MANUAL_CMD_STOP
+    LORA_MANUAL_CMD_STOP,
+    LORA_MANUAL_CMD_TEST_SALT,
+    LORA_MANUAL_CMD_TEST_BRINE,
+    LORA_MANUAL_CMD_AGITATOR_ON,
+    LORA_MANUAL_CMD_AGITATOR_OFF,
+    LORA_MANUAL_CMD_THROWER_ON,
+    LORA_MANUAL_CMD_THROWER_OFF,
+    LORA_MANUAL_CMD_RELAY_ON,
+    LORA_MANUAL_CMD_RELAY_OFF,
+    LORA_MANUAL_CMD_ALL_ON
 } LoRA_ManualCommand_t;
 
-// Initialize LoRA UART interface (UART5, 115200 baud)
+// Initialize LoRA UART interface (UART5, 921600 baud)
 void LoRA_Init(UART_HandleTypeDef *huart5);
 
 // Process incoming byte from UART 5 RX (call from ISR)
@@ -67,6 +76,10 @@ void LoRA_SendManualTelemetry(int motor_m1, int motor_m2,
 // fault_code: fault code number (0-8)
 // action: action taken (0=PAUSE, 1=ESTOP, 2=LOG_ONLY)
 void LoRA_SendFault(uint8_t fault_code, uint8_t action);
+
+// Inject a text command directly into the same parser/pending-command path
+// used by LoRa RX. Returns 1 if accepted, 0 if invalid.
+uint8_t LoRA_InjectCommandText(const char *text);
 
 // Parse and execute incoming command
 // Returns: 1 if command valid, 0 if invalid

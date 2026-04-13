@@ -51,6 +51,9 @@
 #define RAD2DEG (57.2957795130823f)
 #define PI_F      3.14159265f
 #define TWO_PI_F  (2.0f * PI_F)
+#define MANUAL_COMMAND_HOLD_TIMEOUT_MS 220u
+#define MANUAL_DRIVE_STEP_PCT 20
+#define MANUAL_TURN_STEP_PCT 16
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -167,7 +170,11 @@ static int step_toward_manual_output(int current_value, int target_value, int ma
 
 static int s_manual_drive_filtered_pct = 0;
 static int s_manual_turn_filtered_pct = 0;
+static uint32_t s_last_manual_command_ms = 0;
+static uint8_t s_manual_watchdog_stopped = 0;
 static uint32_t s_console_uart2_error_resets = 0;
+static uint32_t s_last_console_uart2_recovery_log_ms = 0;
+static uint32_t s_last_uart_error_log_ms = 0;
 
 static uint8_t PollConsoleUart2(RobotSM_t *sm, uint8_t boot_window)
 {
@@ -184,9 +191,12 @@ static uint8_t PollConsoleUart2(RobotSM_t *sm, uint8_t boot_window)
     (void)dr;
     s_console_uart2_error_resets++;
 
-    if ((s_console_uart2_error_resets % 200u) == 1u) {
+    const uint32_t now_ms = HAL_GetTick();
+    if (s_last_console_uart2_recovery_log_ms == 0u ||
+        (now_ms - s_last_console_uart2_recovery_log_ms) >= 15000u) {
       printf("[CONSOLE] USART2 RX recovered from line error (count=%lu)\r\n",
              (unsigned long)s_console_uart2_error_resets);
+      s_last_console_uart2_recovery_log_ms = now_ms;
     }
   }
 
@@ -255,8 +265,8 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
       const int requested_drive = clamp_manual_output(LoRA_GetManualDrivePct(), -100, 100);
       const int requested_turn = clamp_manual_output(LoRA_GetManualTurnPct(), -100, 100);
 
-      s_manual_drive_filtered_pct = step_toward_manual_output(s_manual_drive_filtered_pct, requested_drive, 12);
-      s_manual_turn_filtered_pct = step_toward_manual_output(s_manual_turn_filtered_pct, requested_turn, 8);
+      s_manual_drive_filtered_pct = step_toward_manual_output(s_manual_drive_filtered_pct, requested_drive, MANUAL_DRIVE_STEP_PCT);
+      s_manual_turn_filtered_pct = step_toward_manual_output(s_manual_turn_filtered_pct, requested_turn, MANUAL_TURN_STEP_PCT);
 
       drive_pct = s_manual_drive_filtered_pct;
       turn_pct = s_manual_turn_filtered_pct;
@@ -271,10 +281,10 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
         }
       }
 
-      const int drive_component = (drive_pct * 78) / 100;
+      const int drive_component = drive_pct;
       const int turn_component = (turn_pct * 30) / 100;
-      m1_speed = clamp_manual_output(drive_component + turn_component, -85, 85);
-      m2_speed = clamp_manual_output(drive_component - turn_component, -85, 85);
+      m1_speed = clamp_manual_output(drive_component + turn_component, -100, 100);
+      m2_speed = clamp_manual_output(drive_component - turn_component, -100, 100);
       break;
     }
     case LORA_MANUAL_CMD_STOP:
@@ -284,6 +294,91 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
       m1_speed = 0;
       m2_speed = 0;
       break;
+    case LORA_MANUAL_CMD_TEST_SALT: {
+      const int salt_pct = clamp_manual_output(LoRA_GetManualDrivePct(), 0, 100);
+      cmd_name = "TEST_SALT";
+      Dispersion_SetRateDirect((uint8_t)salt_pct, 0);
+      char ack_msg[64];
+      snprintf(ack_msg, sizeof(ack_msg), "ACK:TEST_SALT:%d", salt_pct);
+      LoRA_SendRaw(ack_msg);
+      printf("[APP CMD RECEIVED] manual=%s pct=%d\r\n", cmd_name, salt_pct);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    }
+    case LORA_MANUAL_CMD_TEST_BRINE: {
+      const int brine_pct = clamp_manual_output(LoRA_GetManualTurnPct(), 0, 100);
+      cmd_name = "TEST_BRINE";
+      Dispersion_SetRateDirect(0, (uint8_t)brine_pct);
+      char ack_msg[64];
+      snprintf(ack_msg, sizeof(ack_msg), "ACK:TEST_BRINE:%d", brine_pct);
+      LoRA_SendRaw(ack_msg);
+      printf("[APP CMD RECEIVED] manual=%s pct=%d\r\n", cmd_name, brine_pct);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    }
+    case LORA_MANUAL_CMD_AGITATOR_ON:
+      cmd_name = "AGITATOR_ON";
+      Dispersion_SendRaw("AGITATOR ON");
+      LoRA_SendRaw("ACK:AGITATOR:ON");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    case LORA_MANUAL_CMD_AGITATOR_OFF:
+      cmd_name = "AGITATOR_OFF";
+      Dispersion_SendRaw("AGITATOR OFF");
+      LoRA_SendRaw("ACK:AGITATOR:OFF");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    case LORA_MANUAL_CMD_THROWER_ON:
+      cmd_name = "THROWER_ON";
+      Dispersion_SendRaw("THROWER ON");
+      LoRA_SendRaw("ACK:THROWER:ON");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    case LORA_MANUAL_CMD_THROWER_OFF:
+      cmd_name = "THROWER_OFF";
+      Dispersion_SendRaw("THROWER OFF");
+      LoRA_SendRaw("ACK:THROWER:OFF");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    case LORA_MANUAL_CMD_RELAY_ON:
+      cmd_name = "RELAY_ON";
+      Dispersion_SendRaw("RELAY ON");
+      LoRA_SendRaw("ACK:RELAY:ON");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    case LORA_MANUAL_CMD_RELAY_OFF:
+      cmd_name = "RELAY_OFF";
+      Dispersion_SendRaw("RELAY OFF");
+      LoRA_SendRaw("ACK:RELAY:OFF");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    case LORA_MANUAL_CMD_ALL_ON:
+      cmd_name = "ALL_ON";
+      Dispersion_SetRateDirect(100, 100);
+      Dispersion_SendRaw("AGITATOR ON");
+      Dispersion_SendRaw("THROWER ON");
+      Dispersion_SendRaw("RELAY ON");
+      Sabertooth_SetM1(100);
+      Sabertooth_SetM2(100);
+      LoRA_SendRaw("ACK:ALLON");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
     case LORA_MANUAL_CMD_NONE:
     default:
       return;
@@ -292,19 +387,15 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
   RobotSM_Request(&g_sm, STATE_MANUAL);
   Sabertooth_SetM1(m1_speed);
   Sabertooth_SetM2(m2_speed);
+  s_last_manual_command_ms = HAL_GetTick();
+  s_manual_watchdog_stopped = 0;
 
-  char ack_msg[64];
-  if (cmd == LORA_MANUAL_CMD_DRIVE) {
-    snprintf(ack_msg, sizeof(ack_msg), "ACK:%s:%d:%d", cmd_name, drive_pct, turn_pct);
-  } else {
+  const uint8_t send_manual_ack = (cmd != LORA_MANUAL_CMD_DRIVE && cmd != LORA_MANUAL_CMD_FORWARD && cmd != LORA_MANUAL_CMD_BACK && cmd != LORA_MANUAL_CMD_LEFT && cmd != LORA_MANUAL_CMD_RIGHT && cmd != LORA_MANUAL_CMD_STOP);
+  if (send_manual_ack) {
+    char ack_msg[64];
     snprintf(ack_msg, sizeof(ack_msg), "ACK:%s", cmd_name);
-  }
-  LoRA_SendRaw(ack_msg);
-
-  printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
-  if (cmd == LORA_MANUAL_CMD_DRIVE) {
-    printf("[LoRa] manual cmd: %s drive=%d turn=%d -> M1=%d M2=%d\r\n", cmd_name, drive_pct, turn_pct, m1_speed, m2_speed);
-  } else {
+    LoRA_SendRaw(ack_msg);
+    printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
     printf("[LoRa] manual cmd: %s -> M1=%d M2=%d\r\n", cmd_name, m1_speed, m2_speed);
   }
 }
@@ -422,9 +513,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     if (huart->Instance == USART2) {
       if (err != HAL_UART_ERROR_NONE) {
         s_console_uart2_error_resets++;
-        printf("[USART2] ERROR: 0x%08lX, recovered (count=%lu)\r\n",
-               err,
-               (unsigned long)s_console_uart2_error_resets);
+        const uint32_t now_ms = HAL_GetTick();
+        if (s_last_uart_error_log_ms == 0u || (now_ms - s_last_uart_error_log_ms) >= 15000u) {
+          printf("[USART2] ERROR: 0x%08lX, recovered (count=%lu)\r\n",
+                 err,
+                 (unsigned long)s_console_uart2_error_resets);
+          s_last_uart_error_log_ms = now_ms;
+        }
       }
       volatile uint32_t sr = huart2.Instance->SR;
       volatile uint32_t dr = huart2.Instance->DR;
@@ -573,7 +668,7 @@ int main(void)
   HAL_UART_Receive_IT(&huart4, &s_disp_uart4_rx_byte, 1);
   HAL_UART_Receive_IT(&huart5, &s_lora_uart5_rx_byte, 1);
   printf("[UART MAP] SB-ESP: UART4 TX=PC10 RX=PC11 @230400\r\n");
-  printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @460800\r\n");
+  printf("[UART MAP] LoRa-ESP: UART5 TX=PC12 RX=PD2 @921600\r\n");
   Mission_Init();    // Initialize mission management module
   HAL_Delay(100);
 
@@ -649,11 +744,15 @@ int main(void)
   uint32_t last_1hz_ms = HAL_GetTick();
   uint32_t last_1hz_status_ms = HAL_GetTick();
   uint32_t last_sabertooth_poll_ms = HAL_GetTick();
-  const uint32_t status_print_interval_ms = 3000;
+  const uint32_t status_print_interval_ms = 5000;
+  const uint32_t console_quiet_window_ms = 1500;
   uint32_t last_lora_tx_ms = HAL_GetTick();
   uint32_t last_manual_lora_tx_ms = HAL_GetTick();
-  const uint32_t lora_tx_interval_ms = 800;
-  const uint32_t lora_manual_tx_interval_ms = 180;  // balanced latency without starving sensor loop
+  const uint32_t lora_tx_interval_ms = 650;
+  const uint32_t lora_manual_tx_interval_ms = 300;
+  const uint32_t lora_manual_heartbeat_ms = 1200;
+  const float lora_manual_heading_delta_min = 0.6f;
+  const uint8_t lora_manual_feedback_enabled = 1u;
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
     uint8_t startup_mode_sent = 0;
     uint8_t last_test_mode_seen = g_test_mode;
@@ -677,11 +776,13 @@ int main(void)
       (void)PollConsoleUart2(&g_sm, 0);
       
 	  uint32_t now_ms = HAL_GetTick();
-	  GPS_Tick(now_ms);
+    // Keep GPS parser active, but disable baud hopping in direct manual mode.
+    GPS_SetAutoBaudEnabled((RobotSM_Current(&g_sm) == STATE_MANUAL) ? 0u : 1u);
+    GPS_Tick(now_ms);
 	  const GPS_Data_t *gps = GPS_Get();
 
       // Keep LoRa draining steady while prioritizing interactive console latency.
-      LoRA_ProcessRxQueue(64);
+      LoRA_ProcessRxQueue(0);
 
       if (startup_mode_sent && g_test_mode && !last_test_mode_seen) {
           Dispersion_BypassStartupCheck();
@@ -716,7 +817,7 @@ int main(void)
                          gps->latitude_deg, gps->longitude_deg,
                          Sabertooth_GetM1(), Sabertooth_GetM2());
         }
-        HAL_Delay(10);
+        HAL_Delay(1);
         continue; // stay in test mode until reset
       }
 
@@ -747,7 +848,7 @@ int main(void)
         if (LoRA_GetPendingManualCommand(&lora_manual_cmd_fast)) {
           uint32_t lora_age_ms = (LoRA_GetLastRxMs() > 0u) ? (now_ms - LoRA_GetLastRxMs()) : 0u;
           HandleLoRaManualCommand(lora_manual_cmd_fast);
-          printf("[LoRa] manual dispatch age=%lums\r\n", (unsigned long)lora_age_ms);
+          (void)lora_age_ms;
           lora_handled_fast = 1;
         }
 
@@ -772,6 +873,23 @@ int main(void)
             }
           }
         }
+      }
+
+      if (RobotSM_Current(&g_sm) == STATE_MANUAL) {
+        if (s_last_manual_command_ms != 0u &&
+            (now_ms - s_last_manual_command_ms) > MANUAL_COMMAND_HOLD_TIMEOUT_MS) {
+          if (!s_manual_watchdog_stopped) {
+            s_manual_drive_filtered_pct = 0;
+            s_manual_turn_filtered_pct = 0;
+            Sabertooth_StopAll();
+            s_manual_watchdog_stopped = 1u;
+            printf("[LoRa] Manual command stale for %lums -> stop\r\n",
+                   (unsigned long)(now_ms - s_last_manual_command_ms));
+          }
+        }
+      } else {
+        s_last_manual_command_ms = 0u;
+        s_manual_watchdog_stopped = 0u;
       }
 
       // Poll Sabertooth feedback at a bounded cadence to keep loop responsive.
@@ -841,16 +959,45 @@ int main(void)
                  SystemHealth_UpdateLeds(RobotSM_Current(&g_sm), imu_ok, gps->has_fix);
 
           // ===== Fast LoRa telemetry during manual drive (200 ms = 5 Hz) =====
-          // Sends a compact packet so LoRa air-time stays short while the app
-          // still gets responsive motor/proximity/heading feedback.
-          if (RobotSM_Current(&g_sm) == STATE_MANUAL &&
+            // Sends compact telemetry only when values changed or at a heartbeat.
+            // This avoids saturating LoRa with repetitive MANUAL packets.
+          if (lora_manual_feedback_enabled && RobotSM_Current(&g_sm) == STATE_MANUAL &&
               (now_ms - last_manual_lora_tx_ms) >= lora_manual_tx_interval_ms)
           {
-              last_manual_lora_tx_ms = now_ms;
-              LoRA_SendManualTelemetry(
-                  Sabertooth_GetM1(), Sabertooth_GetM2(),
-                  g_hf.yaw_deg,
-                  Proximity_ReadLeft(), Proximity_ReadRight());
+              static uint8_t manual_telem_prev_valid = 0;
+              static int manual_telem_prev_m1 = 0;
+              static int manual_telem_prev_m2 = 0;
+              static float manual_telem_prev_heading = 0.0f;
+              static uint16_t manual_telem_prev_pl = PROX_NO_DETECTION;
+              static uint16_t manual_telem_prev_pr = PROX_NO_DETECTION;
+
+              int m1_now = Sabertooth_GetM1();
+              int m2_now = Sabertooth_GetM2();
+              float heading_now = g_hf.yaw_deg;
+              uint16_t pl_now = Proximity_ReadLeft();
+              uint16_t pr_now = Proximity_ReadRight();
+
+              uint8_t changed = (uint8_t)(
+                !manual_telem_prev_valid ||
+                (m1_now != manual_telem_prev_m1) ||
+                (m2_now != manual_telem_prev_m2) ||
+                (heading_now > (manual_telem_prev_heading + lora_manual_heading_delta_min)) ||
+                (heading_now < (manual_telem_prev_heading - lora_manual_heading_delta_min)) ||
+                (pl_now != manual_telem_prev_pl) ||
+                (pr_now != manual_telem_prev_pr));
+
+              uint8_t heartbeat_due = (uint8_t)((now_ms - last_manual_lora_tx_ms) >= lora_manual_heartbeat_ms);
+              if (changed || heartbeat_due) {
+                last_manual_lora_tx_ms = now_ms;
+                LoRA_SendManualTelemetry(m1_now, m2_now, heading_now, pl_now, pr_now);
+
+                manual_telem_prev_valid = 1;
+                manual_telem_prev_m1 = m1_now;
+                manual_telem_prev_m2 = m2_now;
+                manual_telem_prev_heading = heading_now;
+                manual_telem_prev_pl = pl_now;
+                manual_telem_prev_pr = pr_now;
+              }
           }
 
             // ===== 1Hz Periodic Health Checks and Recovery =====
@@ -859,31 +1006,36 @@ int main(void)
                 static uint32_t next_gps_recovery_ms = 0;
               last_1hz_ms += 1000;
 
-                if (GPS_IsHealthy()) {
-                  next_gps_recovery_ms = now_ms;
-                }
+                const RobotState_t health_state_now = RobotSM_Current(&g_sm);
+                const uint8_t suppress_health_recovery = (health_state_now == STATE_MANUAL) ? 1u : 0u;
 
-              if (!GPS_IsHealthy() && now_ms >= next_gps_recovery_ms) {
-                  printf("[GPS] WARNING: Receiver not responding - rx_bytes=%lu - attempting recovery\r\n",
-                         (unsigned long)GPS_GetRxByteCount());
-                  GPS_CheckAndRecover();
-                next_gps_recovery_ms = now_ms + 10000u;
-              }
-
-                if (imu_consecutive_failures >= 10u
-                  && (now_ms - imu_last_update_ms) > 2000u
-                  && now_ms >= next_imu_recovery_ms) {
-                  printf("[IMU] WARNING: No successful samples for %lu ms - attempting recovery\r\n",
-                         (unsigned long)(now_ms - imu_last_update_ms));
-                  IMU_CheckAndRecover();
-                  imu_ok = IMU_GetInitStatus();
-                  if (imu_ok) {
-                      imu_last_update_ms = now_ms;
-                    next_imu_recovery_ms = now_ms + 2000u;
-                  } else {
-                    next_imu_recovery_ms = now_ms + 10000u;
+                if (!suppress_health_recovery) {
+                  if (GPS_IsHealthy()) {
+                    next_gps_recovery_ms = now_ms;
                   }
-              }
+
+                  if (!GPS_IsHealthy() && now_ms >= next_gps_recovery_ms) {
+                      printf("[GPS] WARNING: Receiver not responding - rx_bytes=%lu - attempting recovery\r\n",
+                             (unsigned long)GPS_GetRxByteCount());
+                      GPS_CheckAndRecover();
+                    next_gps_recovery_ms = now_ms + 10000u;
+                  }
+
+                  if (imu_consecutive_failures >= 10u
+                    && (now_ms - imu_last_update_ms) > 2000u
+                    && now_ms >= next_imu_recovery_ms) {
+                    printf("[IMU] WARNING: No successful samples for %lu ms - attempting recovery\r\n",
+                           (unsigned long)(now_ms - imu_last_update_ms));
+                    IMU_CheckAndRecover();
+                    imu_ok = IMU_GetInitStatus();
+                    if (imu_ok) {
+                        imu_last_update_ms = now_ms;
+                      next_imu_recovery_ms = now_ms + 2000u;
+                    } else {
+                      next_imu_recovery_ms = now_ms + 10000u;
+                    }
+                  }
+                }
           }
 
           // State machine task dispatch (Phase 2 and 3)
@@ -915,6 +1067,15 @@ int main(void)
             // ---- 1 Hz status/readout prints (SKIP during test mode) ----
             if ((now_ms - last_1hz_status_ms) >= status_print_interval_ms && !g_test_mode)
           {
+              if (RobotSM_Current(&g_sm) == STATE_MANUAL) {
+                  last_1hz_status_ms = now_ms;
+                  continue;
+              }
+              uint32_t last_console_input_ms = Console_GetLastInputMs();
+              if (last_console_input_ms > 0u && (now_ms - last_console_input_ms) < console_quiet_window_ms) {
+                  last_1hz_status_ms = now_ms;
+                  continue;
+              }
               last_1hz_status_ms += status_print_interval_ms;
               
               // Print sensor status (IMU, GPS, fusion)
@@ -939,7 +1100,8 @@ int main(void)
               uint8_t gps_num_sat = gps->num_satellites;
               float gps_hdop = gps->hdop;
               
-              if ((now_ms - last_lora_tx_ms) >= lora_tx_interval_ms) {
+                if (RobotSM_Current(&g_sm) != STATE_MANUAL &&
+                  (now_ms - last_lora_tx_ms) >= lora_tx_interval_ms) {
                   last_lora_tx_ms += lora_tx_interval_ms;
 
                   // Send comprehensive telemetry to LoRA ESP32 (mobile app / base station)
@@ -1315,7 +1477,7 @@ static void MX_UART5_Init(void)
 
   /* USER CODE END UART5_Init 1 */
   huart5.Instance = UART5;
-  huart5.Init.BaudRate = 460800;
+  huart5.Init.BaudRate = 921600;
   huart5.Init.WordLength = UART_WORDLENGTH_8B;
   huart5.Init.StopBits = UART_STOPBITS_1;
   huart5.Init.Parity = UART_PARITY_NONE;
@@ -1604,3 +1766,8 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
+
+
+
+
