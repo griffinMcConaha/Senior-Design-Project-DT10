@@ -340,6 +340,18 @@ static HAL_StatusTypeDef ICM20948_ReadAccelGyro(float *ax, float *ay, float *az,
     return HAL_OK;
 }
 
+// Read accel/gyro with one short retry to tolerate transient I2C glitches.
+static HAL_StatusTypeDef ICM20948_ReadAccelGyro_Retry(float *ax, float *ay, float *az,
+                                                      float *gx, float *gy, float *gz)
+{
+    HAL_StatusTypeDef st = ICM20948_ReadAccelGyro(ax, ay, az, gx, gy, gz);
+    if (st == HAL_OK) return HAL_OK;
+
+    HAL_Delay(2);
+    st = ICM20948_ReadAccelGyro(ax, ay, az, gx, gy, gz);
+    return st;
+}
+
 // ======================================================
 // Public API
 // ======================================================
@@ -434,8 +446,21 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
     printf(ANSI_YELLOW "[IMU] Magnetometer disabled (IMU_USE_MAG=0)\r\n" ANSI_RESET);
 #endif
 
+    // Verify live data read before declaring init complete.
+    {
+        float tax = 0, tay = 0, taz = 0, tgx = 0, tgy = 0, tgz = 0;
+        HAL_StatusTypeDef sample_status = ICM20948_ReadAccelGyro_Retry(&tax, &tay, &taz, &tgx, &tgy, &tgz);
+        if (sample_status != HAL_OK) {
+            printf(ANSI_RED "[IMU] FAILED: post-init sample read did not succeed (error: %d)\r\n" ANSI_RESET, sample_status);
+            s_init_ok = 0;
+            s_last_ok = 0;
+            return;
+        }
+    }
+
     // Mark initialization as successful only if device verified
     s_init_ok = 1;
+    s_last_ok = 1;
     printf(ANSI_GREEN "[IMU] Initialization complete (accel/gyro%s)\r\n" ANSI_RESET,
            IMU_USE_MAG ? " + mag" : "");
 }
@@ -453,7 +478,7 @@ IMU_Status_t IMU_Read(void)
         return out;
     }
 
-    HAL_StatusTypeDef st = ICM20948_ReadAccelGyro(&s_ax, &s_ay, &s_az, &s_gx, &s_gy, &s_gz);
+    HAL_StatusTypeDef st = ICM20948_ReadAccelGyro_Retry(&s_ax, &s_ay, &s_az, &s_gx, &s_gy, &s_gz);
 
     // Read temperature
     if (st == HAL_OK)
