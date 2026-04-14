@@ -322,26 +322,28 @@ int _write(int file, char *ptr, int len)
     (void)file;
     if (g_printf_uart == NULL) return len;
 
-    // Keep console output responsive: send in short chunks with a bounded timeout
-    // so RX polling is not starved by long printf bursts.
-    int sent = 0;
-    while (sent < len) {
-        uint16_t chunk = (uint16_t)(len - sent);
-        if (chunk > CONSOLE_PRINTF_TX_CHUNK) {
-            chunk = CONSOLE_PRINTF_TX_CHUNK;
+    for (int i = 0; i < len; ++i) {
+        if (ptr[i] == '\n' && (i == 0 || ptr[i - 1] != '\r')) {
+            uint8_t cr = '\r';
+            HAL_StatusTypeDef cr_status = HAL_UART_Transmit(
+                g_printf_uart,
+                &cr,
+                1,
+                CONSOLE_PRINTF_TX_TIMEOUT_MS);
+            if (cr_status != HAL_OK) {
+                break;
+            }
         }
 
         HAL_StatusTypeDef st = HAL_UART_Transmit(
             g_printf_uart,
-            (uint8_t *)(ptr + sent),
-            chunk,
+            (uint8_t *)&ptr[i],
+            1,
             CONSOLE_PRINTF_TX_TIMEOUT_MS);
 
         if (st != HAL_OK) {
             break;
         }
-
-        sent += (int)chunk;
     }
 
     return len;

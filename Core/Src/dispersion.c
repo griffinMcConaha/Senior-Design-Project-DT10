@@ -31,6 +31,11 @@ typedef struct {
     uint32_t tx_count;
     uint32_t rx_count;
     uint32_t raw_rx_byte_count;
+    // PHASE 4: Startup check state tracking (sync with ESP32 startup gating)
+    uint8_t startup_check_in_progress;  // ESP32 is running startup check
+    uint8_t startup_check_completed;    // ESP32 has completed startup check
+    uint32_t startup_check_started_ms;  // Timestamp when startup check was requested
+    uint32_t startup_check_timeout_ms;  // Max duration allowed for startup (180s on ESP32)
 } Dispersion_State_t;
 
 static Dispersion_State_t disp_state = {0};
@@ -45,7 +50,12 @@ void Dispersion_RequestStartupCheck(void)
     if (tx_status == HAL_OK) {
         disp_state.last_tx_ms = HAL_GetTick();
         disp_state.tx_count++;
+        // Mark startup check as in-progress
+        disp_state.startup_check_in_progress = 1;
+        disp_state.startup_check_completed = 0;
+        disp_state.startup_check_started_ms = HAL_GetTick();
         printf("[DISP] TX CMD: %s", cmd);
+        printf("[DISP] Startup check initiated (ESP32 will agitate for 180s)\r\n");
     } else {
         printf("[DISP] UART4 TX failed (StartupCheck), status=%d\r\n", (int)tx_status);
     }
@@ -61,7 +71,12 @@ void Dispersion_BypassStartupCheck(void)
     if (tx_status == HAL_OK) {
         disp_state.last_tx_ms = HAL_GetTick();
         disp_state.tx_count++;
+        // Mark startup check as bypassed (completed immediately)
+        disp_state.startup_check_in_progress = 0;
+        disp_state.startup_check_completed = 1;
+        disp_state.startup_check_started_ms = HAL_GetTick();
         printf("[DISP] TX CMD: %s", cmd);
+        printf("[DISP] Startup check bypassed (immediate unlock)\r\n");
     } else {
         printf("[DISP] UART4 TX failed (StartupBypass), status=%d\r\n", (int)tx_status);
     }
@@ -92,6 +107,11 @@ void Dispersion_Init(UART_HandleTypeDef *huart4)
     disp_state.tx_count = 0;
     disp_state.rx_count = 0;
     disp_state.raw_rx_byte_count = 0;
+    // Initialize startup check state: not in progress, not completed
+    disp_state.startup_check_in_progress = 0;
+    disp_state.startup_check_completed = 0;
+    disp_state.startup_check_started_ms = 0;
+    disp_state.startup_check_timeout_ms = 190000;  // 190s (ESP32 runs 180s check + 10s margin)
 
     printf("[DISP] Dispersion system initialized (UART 4 at 9600 baud)\r\n");
 }
@@ -103,6 +123,17 @@ void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate)
 {
     if (!disp_state.initialized)
         return;
+
+    // PHASE 4: Gate commands during startup check
+    // ESP32 will reject SALT/BRINE commands until startup_check_completed
+    if (!disp_state.startup_check_completed) {
+        if (disp_state.startup_check_in_progress) {
+            printf("[DISP] WARNING: Ignoring SALT/BRINE command during startup check (in progress)\r\n");
+        } else {
+            printf("[DISP] WARNING: Ignoring SALT/BRINE command - startup check not yet initiated\r\n");
+        }
+        return;  // Do not send; gate the command
+    }
 
     // Clamp input ranges
     if (salt_rate > 100) salt_rate = 100;
@@ -131,8 +162,6 @@ void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate)
 
     // The dedicated ESP32 applies the actual salt/brine output logic once it receives
     // the UART command, so there is no local PWM command path on the STM32.
-
-
 
     // Log change
     printf("[DISP] Dispersion rates: salt=%d%%, brine=%d%%\r\n",
@@ -311,12 +340,37 @@ void Dispersion_RxByte(uint8_t byte)
                 disp_state.last_rx_ms = HAL_GetTick();
                 disp_state.rx_count++;
 
+                // PHASE 4: Parse startup check state from ESP32 responses
+                if (strstr(resp, "STARTUP_CHECK_STARTED") != NULL) {
+                    disp_state.startup_check_in_progress = 1;
+                    disp_state.startup_check_completed = 0;
+                    printf("[DISP] RX: Startup check started on ESP32 (will complete in ~180s)\r\n");
+                }
+                else if (strstr(resp, "STARTUP_CHECK_BYPASSED") != NULL) {
+                    disp_state.startup_check_in_progress = 0;
+                    disp_state.startup_check_completed = 1;
+                    printf("[DISP] RX: Startup check bypassed on ESP32 (immediately ready)\r\n");
+                }
+                else if (strstr(resp, "STARTUP_CHECK_RUNNING") != NULL) {
+                    disp_state.startup_check_in_progress = 1;
+                    disp_state.startup_check_completed = 0;
+                    printf("[DISP] RX: Startup check already running on ESP32\r\n");
+                }
+                else if (strstr(resp, "STARTUP_REQUIRED") != NULL) {
+                    printf("[DISP] RX: Command rejected - startup check required on ESP32\r\n");
+                }
+
                 if (strncmp(resp, "STATUS:OK", 9) == 0)
                 {
+                    // OK status received (may have additional qualifiers parsed above)
                 }
                 else if (strncmp(resp, "STATUS:ERROR", 12) == 0)
                 {
-                    // TODO: Set fault code FAULT_DISPERSION_CLOG
+                    // ERROR status - may be startup required or clog
+                    if (strstr(resp, "STARTUP_REQUIRED") == NULL) {
+                        // Assume clog if not startup-related
+                        printf("[DISP] RX: Error response from ESP32 (possible clog)\r\n");
+                    }
                 }
                 else if (strstr(resp, "FLOW:") != NULL)
                 {
@@ -367,6 +421,21 @@ void Dispersion_Task(void)
     if (!disp_state.initialized)
         return;
 
+    // PHASE 4: Monitor startup check timeout
+    uint32_t now = HAL_GetTick();
+    if (disp_state.startup_check_in_progress && !disp_state.startup_check_completed)
+    {
+        uint32_t elapsed = now - disp_state.startup_check_started_ms;
+        if (elapsed > disp_state.startup_check_timeout_ms)
+        {
+            printf("[DISP] ERROR: Startup check timeout! (elapsed=%u ms, timeout=%u ms)\r\n", 
+                   elapsed, disp_state.startup_check_timeout_ms);
+            printf("[DISP] Auto-completing startup check (may indicate ESP32 hang)\r\n");
+            disp_state.startup_check_in_progress = 0;
+            disp_state.startup_check_completed = 1;
+        }
+    }
+
     // Read flow sensors
     uint16_t salt_flow = Dispersion_ReadSaltFlow();
     uint16_t brine_flow = Dispersion_ReadBrineFlow();
@@ -386,7 +455,6 @@ void Dispersion_Task(void)
 
     // Periodic monitoring (every 5 seconds)
     static uint32_t last_log = 0;
-    uint32_t now = HAL_GetTick();
     if ((now - last_log) >= 5000)
     {
         last_log = now;
@@ -442,5 +510,32 @@ uint8_t Dispersion_GetSaltRate(void)
 uint8_t Dispersion_GetBrineRate(void)
 {
     return disp_state.brine_rate_percent;
+}
+
+// PHASE 4: Get startup check state
+// Returns: 1 if startup check is complete and commands can be sent, 0 otherwise
+uint8_t Dispersion_IsStartupCheckComplete(void)
+{
+    return disp_state.startup_check_completed;
+}
+
+// Get startup check in-progress status
+// Returns: 1 if startup check is currently running, 0 otherwise
+uint8_t Dispersion_IsStartupCheckInProgress(void)
+{
+    return disp_state.startup_check_in_progress;
+}
+
+// Get time elapsed since startup check started (milliseconds)
+// Useful for progress indication to operator
+uint32_t Dispersion_GetStartupCheckElapsedMs(void)
+{
+    if (!disp_state.startup_check_in_progress && !disp_state.startup_check_started_ms)
+        return 0;  // Not started
+    
+    uint32_t now = HAL_GetTick();
+    uint32_t elapsed = (disp_state.startup_check_started_ms > 0) ? 
+                       (now - disp_state.startup_check_started_ms) : 0;
+    return elapsed;
 }
 

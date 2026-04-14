@@ -68,6 +68,18 @@ uint8_t Dispersion_GetSaltRate(void);
 // Get current brine dispersion rate (0-100%)
 uint8_t Dispersion_GetBrineRate(void);
 
+// PHASE 4: Get startup check state
+// Returns: 1 if startup check is complete and commands can be sent, 0 otherwise
+uint8_t Dispersion_IsStartupCheckComplete(void);
+
+// Get startup check in-progress status
+// Returns: 1 if startup check is currently running, 0 otherwise
+uint8_t Dispersion_IsStartupCheckInProgress(void);
+
+// Get time elapsed since startup check started (milliseconds)
+// Useful for progress indication to operator (e.g., "Startup check: 75/180 seconds")
+uint32_t Dispersion_GetStartupCheckElapsedMs(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -141,6 +141,51 @@ static const char* lora_state_name(uint8_t state)
     }
 }
 
+static const char* lora_manual_cmd_name(LoRA_ManualCommand_t cmd)
+{
+    switch (cmd)
+    {
+        case LORA_MANUAL_CMD_DRIVE: return "DRIVE";
+        case LORA_MANUAL_CMD_FORWARD: return "FORWARD";
+        case LORA_MANUAL_CMD_BACK: return "BACKWARD";
+        case LORA_MANUAL_CMD_LEFT: return "LEFT";
+        case LORA_MANUAL_CMD_RIGHT: return "RIGHT";
+        case LORA_MANUAL_CMD_STOP: return "STOP";
+        case LORA_MANUAL_CMD_ALL_ON: return "ALLON";
+        case LORA_MANUAL_CMD_AGITATOR_ON: return "AGITATOR_ON";
+        case LORA_MANUAL_CMD_AGITATOR_OFF: return "AGITATOR_OFF";
+        case LORA_MANUAL_CMD_THROWER_ON: return "THROWER_ON";
+        case LORA_MANUAL_CMD_THROWER_OFF: return "THROWER_OFF";
+        case LORA_MANUAL_CMD_RELAY_ON: return "RELAY_ON";
+        case LORA_MANUAL_CMD_RELAY_OFF: return "RELAY_OFF";
+        case LORA_MANUAL_CMD_TEST_SALT: return "TEST_SALT";
+        case LORA_MANUAL_CMD_TEST_BRINE: return "TEST_BRINE";
+        case LORA_MANUAL_CMD_NONE:
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static void lora_send_received_ack_for_state(uint8_t requested_state)
+{
+    char ack_msg[48];
+    snprintf(ack_msg, sizeof(ack_msg), "ACK:STATE:%s", lora_state_name(requested_state));
+    LoRA_SendRaw(ack_msg);
+}
+
+static void lora_send_received_ack_for_manual(LoRA_ManualCommand_t cmd)
+{
+    char ack_msg[48];
+
+    if (cmd == LORA_MANUAL_CMD_DRIVE && lora_state.manual_seq_valid) {
+        snprintf(ack_msg, sizeof(ack_msg), "ACK:S:%lu", (unsigned long)lora_state.manual_seq);
+    } else {
+        snprintf(ack_msg, sizeof(ack_msg), "ACK:CMD:%s", lora_manual_cmd_name(cmd));
+    }
+
+    LoRA_SendRaw(ack_msg);
+}
+
 static int8_t lora_clamp_percent(int value)
 {
     if (value > 100) return 100;
@@ -536,6 +581,7 @@ static uint8_t lora_accept_command_text(const char *cmd)
         lora_state.command_valid = 1;
         strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
         lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        lora_send_received_ack_for_state(lora_state.pending_state_request);
         if (s_lora_verbose) {
             printf("[LORA] Valid command: %s -> state=%u\r\n", cmd, lora_state.pending_state_request);
         }
@@ -556,6 +602,7 @@ static uint8_t lora_accept_command_text(const char *cmd)
         lora_state.manual_command_valid = 1;
         strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
         lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        lora_send_received_ack_for_manual(lora_state.pending_manual_cmd);
         if (s_lora_verbose) {
             printf("[LORA] Valid manual command: %s -> cmd=%u\r\n", cmd, (unsigned)lora_state.pending_manual_cmd);
         }
@@ -878,6 +925,7 @@ static void lora_process_rx_byte(uint8_t byte)
                 lora_state.command_valid = 1;
                 strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
                 lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+                lora_send_received_ack_for_state(lora_state.pending_state_request);
                 if (s_lora_verbose) {
                     printf("[LORA] Valid command: %s -> state=%u\r\n", cmd, lora_state.pending_state_request);
                 }
@@ -896,6 +944,7 @@ static void lora_process_rx_byte(uint8_t byte)
                 lora_state.manual_command_valid = 1;
                 strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
                 lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+                lora_send_received_ack_for_manual(lora_state.pending_manual_cmd);
                 if (s_lora_verbose) {
                     printf("[LORA] Valid manual command: %s -> cmd=%u\r\n", cmd, (unsigned)lora_state.pending_manual_cmd);
                 }

@@ -253,7 +253,10 @@ void AutonomousControl_Task(void)
                (int)wp_index + 1, (int)g_sm.mission.total_waypoints, distance_to_waypoint);
         
         // Apply dispersion rates from waypoint before advancing
-        Dispersion_SetRate(target->salt_rate, target->brine_rate);
+        // PHASE 4: Convert float rates (0.0-1.0) to percentages (0-100) for ESP32
+        uint8_t salt_pct = (uint8_t)(target->salt_rate * 100.0f + 0.5f);  // Round to nearest
+        uint8_t brine_pct = (uint8_t)(target->brine_rate * 100.0f + 0.5f);
+        Dispersion_SetRate(salt_pct, brine_pct);
         
         // Advance to next waypoint
         if (!RobotSM_AdvanceWaypoint(&g_sm))
@@ -279,7 +282,10 @@ void AutonomousControl_Task(void)
     float heading_error = Heading_Error(desired_heading, current_heading);
 
     // Apply dispersion rates from current waypoint
-    Dispersion_SetRate(target->salt_rate, target->brine_rate);
+    // PHASE 4: Convert float rates (0.0-1.0) to percentages (0-100) for ESP32
+    uint8_t salt_pct_ongoing = (uint8_t)(target->salt_rate * 100.0f + 0.5f);
+    uint8_t brine_pct_ongoing = (uint8_t)(target->brine_rate * 100.0f + 0.5f);
+    Dispersion_SetRate(salt_pct_ongoing, brine_pct_ongoing);
 
     // Motor control: base forward speed with heading correction
     int base_speed = 40; // Moderate forward speed
