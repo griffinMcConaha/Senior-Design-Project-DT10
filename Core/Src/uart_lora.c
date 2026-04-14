@@ -1241,7 +1241,7 @@ void LoRA_SendState(uint8_t state, float gps_lat, float gps_lon,
     float approx_speed = (float)abs((motor_m1 + motor_m2) / 2) / 100.0f;
     char msg[96];
     snprintf(msg, sizeof(msg),
-             "S:%s,%.4f,%.4f,0.0,%.2f,0,0.0,0\r\n",
+             "S:%s,%.6f,%.6f,0.0,%.2f,0,0.0,0\r\n",
              lora_state_name(state), gps_lat, gps_lon, approx_speed);
 
     lora_uart5_send(msg, "state");
@@ -1288,7 +1288,7 @@ void LoRA_SendTelemetry(uint8_t state, float gps_lat, float gps_lon, uint8_t gps
     float approx_speed = (float)abs((motor_m1 + motor_m2) / 2) / 100.0f;
     char msg[128];
     snprintf(msg, sizeof(msg),
-             "T:%s,%.4f,%.4f,%.1f,%.2f,%u,%.1f,%u,%d,%d,%u,%u\r\n",
+             "T:%s,%.6f,%.6f,%.1f,%.2f,%u,%.1f,%u,%d,%d,%u,%u\r\n",
              lora_state_name(state), gps_lat, gps_lon, yaw_deg, approx_speed,
              gps_has_fix, gps_hdop, gps_num_sat, motor_m1, motor_m2, salt_rate, brine_rate);
 

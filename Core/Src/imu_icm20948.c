@@ -351,7 +351,7 @@ static HAL_StatusTypeDef IMU_ProbeAndSelectAddress(void)
             HAL_StatusTypeDef st = HAL_I2C_Mem_Read(
                 s_hi2c, test_addr, WHO_AM_I, 1, &who, 1, I2C_TIMEOUT_MS);
                 
-            if (st == HAL_OK && who == 0xEAu) {
+            if (st == HAL_OK && who == 0xEA) {
                 s_imu_addr = test_addr;
                 printf(ANSI_GREEN "[IMU] ✓ Device found at 0x%02X (WHO_AM_I=0x%02X)\r\n" ANSI_RESET, 
                        addr_7bit, who);

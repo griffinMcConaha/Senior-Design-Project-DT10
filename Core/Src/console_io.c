@@ -212,11 +212,12 @@ static void Console_ForceAllOutputsOff(const char *reason)
     Dispersion_SendRaw("AGITATOR OFF");
     Dispersion_SendRaw("THROWER OFF");
     Dispersion_SendRaw("RELAY OFF");
+    Dispersion_SendRaw("VIBRATION OFF");
 
     if (reason && reason[0] != '\0') {
-        printf("\r\n[DIAG] Safe OFF applied (%s)\r\n", reason);
+        printf("\r\n[DIAG] Safe OFF applied (%s): AGITATOR=OFF THROWER=OFF RELAY=OFF VIBRATION=OFF\r\n", reason);
     } else {
-        printf("\r\n[DIAG] Safe OFF applied\r\n");
+        printf("\r\n[DIAG] Safe OFF applied: AGITATOR=OFF THROWER=OFF RELAY=OFF VIBRATION=OFF\r\n");
     }
 }
 

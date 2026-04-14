@@ -775,6 +775,7 @@ int main(void)
   const uint32_t lora_manual_heartbeat_ms = 1200;
   const float lora_manual_heading_delta_min = 0.6f;
   const uint8_t lora_manual_feedback_enabled = 1u;
+  float latest_imu_temp_c = 0.0f;
   uint32_t last_lora_raw_count_seen = LoRA_GetRawFrameCount();
     uint8_t startup_mode_sent = 0;
     uint8_t last_test_mode_seen = g_test_mode;
@@ -945,6 +946,7 @@ int main(void)
           {
             imu_consecutive_failures = 0;
             imu_ok = 1;
+		  latest_imu_temp_c = imu.temperature_c;
 		  /* Use fixed 50 Hz timestep (20 ms) for consistency */
 		  float dt = 0.02f;
 		  imu_last_update_ms = now_ms;
@@ -963,6 +965,8 @@ int main(void)
           {
             imu_ok = ((imu_consecutive_failures < 10u) || ((now_ms - imu_last_update_ms) <= 2000u)) ? 1u : 0u;
           }
+
+          latest_imu_temp_c = imu_last.temperature_c;
 
           SystemHealthInputs_t sh = {
               .imu_ok = imu_ok,
@@ -1091,6 +1095,32 @@ int main(void)
           // Update LoRA periodic tasks (timeout checking, etc.)
           LoRA_Tick(now_ms);
 
+          // Keep non-manual telemetry flowing at LoRa cadence even when status logs are throttled.
+          if (RobotSM_Current(&g_sm) != STATE_MANUAL &&
+              (now_ms - last_lora_tx_ms) >= lora_tx_interval_ms) {
+              last_lora_tx_ms = now_ms;
+
+              uint16_t prox_left_cm = Proximity_ReadLeft();
+              uint16_t prox_right_cm = Proximity_ReadRight();
+              int m1_speed = Sabertooth_GetM1();
+              int m2_speed = Sabertooth_GetM2();
+              uint8_t salt_rate = Dispersion_GetSaltRate();
+              uint8_t brine_rate = Dispersion_GetBrineRate();
+
+              LoRA_SendTelemetry(RobotSM_Current(&g_sm),
+                                 gps->latitude_deg, gps->longitude_deg, gps->has_fix,
+                                 gps->num_satellites, gps->hdop,
+                                 m1_speed, m2_speed,
+                                 g_hf.yaw_deg, g_hf.pitch_deg,
+                                 salt_rate, brine_rate, latest_imu_temp_c,
+                                 prox_left_cm, prox_right_cm);
+
+              const char *lora_tx_payload = LoRA_GetLastTxPayload();
+              if (MAIN_VERBOSE_TELEMETRY_LOGS && lora_tx_payload && lora_tx_payload[0] != '\0') {
+                printf(ANSI_YELLOW "[MAIN] LoRa TX: " ANSI_RESET "%s", lora_tx_payload);
+              }
+          }
+
             // ---- 1 Hz status/readout prints (SKIP during test mode) ----
             if ((now_ms - last_1hz_status_ms) >= status_print_interval_ms && !g_test_mode)
           {
@@ -1126,26 +1156,6 @@ int main(void)
               // Get GPS quality metrics
               uint8_t gps_num_sat = gps->num_satellites;
               float gps_hdop = gps->hdop;
-              
-                if (RobotSM_Current(&g_sm) != STATE_MANUAL &&
-                  (now_ms - last_lora_tx_ms) >= lora_tx_interval_ms) {
-                  last_lora_tx_ms += lora_tx_interval_ms;
-
-                  // Send comprehensive telemetry to LoRA ESP32 (mobile app / base station)
-                  // Includes: state, GPS position + quality, motor speeds, heading, pitch, dispersion rates, temperature, proximity
-                  LoRA_SendTelemetry(RobotSM_Current(&g_sm),
-                                     gps->latitude_deg, gps->longitude_deg, gps->has_fix,
-                                     gps_num_sat, gps_hdop,
-                                     m1_speed, m2_speed,
-                                     g_hf.yaw_deg, g_hf.pitch_deg,
-                                     salt_rate, brine_rate, imu_temp,
-                                     prox_left_cm, prox_right_cm);
-
-                  const char *lora_tx_payload = LoRA_GetLastTxPayload();
-                  if (MAIN_VERBOSE_TELEMETRY_LOGS && lora_tx_payload && lora_tx_payload[0] != '\0') {
-                    printf(ANSI_YELLOW "[MAIN] LoRa TX: " ANSI_RESET "%s", lora_tx_payload);
-                  }
-              }
               
               // Debug: Log comprehensive state with ANSI colors
               // Format proximity as "XXcm" or "NO_DETECT"
