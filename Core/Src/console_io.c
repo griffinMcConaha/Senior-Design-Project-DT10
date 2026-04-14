@@ -2454,7 +2454,9 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 
     if (strcmp(cmd_upper, "RESET") == 0) {
         RobotState_t cur = RobotSM_Current(sm);
-        if (cur == STATE_ESTOP || cur == STATE_ERROR) {
+        if (cur == STATE_ESTOP) {
+            RobotSM_RequestEstopReset(sm);
+        } else if (cur == STATE_ERROR) {
             RobotSM_Request(sm, STATE_PAUSE);
         }
         return;

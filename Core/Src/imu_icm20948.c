@@ -82,6 +82,7 @@ static I2C_HandleTypeDef *s_hi2c = NULL;
 static uint8_t s_last_ok = 0;
 static uint8_t s_calibrated = 0;
 static uint8_t s_init_ok = 0;  // Tracks whether IMU init succeeded
+static uint32_t s_last_i2c_error_log_ms = 0;
 
 // raw last readings (counts)
 static float s_ax=0, s_ay=0, s_az=0;
@@ -101,16 +102,77 @@ static float s_mag_bias[3]  = {0};
 // ======================================================
 // Private helpers
 // ======================================================
-static void ICM20948_SelectBank(uint8_t bank)
+static HAL_StatusTypeDef ICM20948_SelectBank(uint8_t bank)
 {
     uint8_t value = (uint8_t)(bank << 4);
-    (void)HAL_I2C_Mem_Write(s_hi2c, ICM20948_ADDR, REG_BANK_SEL, 1, &value, 1, I2C_TIMEOUT_MS);
+    return HAL_I2C_Mem_Write(s_hi2c, ICM20948_ADDR, REG_BANK_SEL, 1, &value, 1, I2C_TIMEOUT_MS);
+}
+
+static void IMU_LogI2CFailure(const char *op, HAL_StatusTypeDef status)
+{
+    if (s_hi2c == NULL) {
+        return;
+    }
+
+    const uint32_t now = HAL_GetTick();
+    if ((now - s_last_i2c_error_log_ms) < 200u) {
+        return;
+    }
+    s_last_i2c_error_log_ms = now;
+
+    const uint32_t err = s_hi2c->ErrorCode;
+    printf(ANSI_RED "[IMU][I2C] %s failed: status=%d err=0x%08lX" ANSI_RESET,
+           op,
+           (int)status,
+           (unsigned long)err);
+    if (err != HAL_I2C_ERROR_NONE) {
+        printf(ANSI_RED " flags:" ANSI_RESET);
+        if (err & HAL_I2C_ERROR_BERR)   printf(" BERR");
+        if (err & HAL_I2C_ERROR_ARLO)   printf(" ARLO");
+        if (err & HAL_I2C_ERROR_AF)     printf(" AF");
+        if (err & HAL_I2C_ERROR_OVR)    printf(" OVR");
+#ifdef HAL_I2C_ERROR_DMA
+        if (err & HAL_I2C_ERROR_DMA)    printf(" DMA");
+#endif
+#ifdef HAL_I2C_ERROR_TIMEOUT
+        if (err & HAL_I2C_ERROR_TIMEOUT) printf(" TIMEOUT");
+#endif
+    }
+    printf("\r\n");
+}
+
+static HAL_StatusTypeDef IMU_ReinitializeI2C(const char *reason)
+{
+    if (s_hi2c == NULL) {
+        return HAL_ERROR;
+    }
+
+    if (reason != NULL && reason[0] != '\0') {
+        printf(ANSI_YELLOW "[IMU][I2C] Reinit: %s\r\n" ANSI_RESET, reason);
+    }
+
+    HAL_I2C_DeInit(s_hi2c);
+    HAL_Delay(2);
+    HAL_StatusTypeDef st = HAL_I2C_Init(s_hi2c);
+    HAL_Delay(5);
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("HAL_I2C_Init", st);
+    }
+    return st;
 }
 
 static HAL_StatusTypeDef IMU_I2C_Read(uint8_t reg, uint8_t *buf, uint16_t len)
 {
-    ICM20948_SelectBank(0);
-    return HAL_I2C_Mem_Read(s_hi2c, ICM20948_ADDR, reg, 1, buf, len, I2C_TIMEOUT_MS);
+    HAL_StatusTypeDef st = ICM20948_SelectBank(0);
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(0)", st);
+        return st;
+    }
+    st = HAL_I2C_Mem_Read(s_hi2c, ICM20948_ADDR, reg, 1, buf, len, I2C_TIMEOUT_MS);
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("Mem_Read", st);
+    }
+    return st;
 }
 
 static HAL_StatusTypeDef IMU_I2C_Write(uint8_t reg, uint8_t data)
@@ -139,9 +201,7 @@ static HAL_StatusTypeDef IMU_ProbeAndSelectAddress(void)
             }
         }
 
-        HAL_I2C_DeInit(s_hi2c);
-        HAL_Delay(5);
-        HAL_I2C_Init(s_hi2c);
+        (void)IMU_ReinitializeI2C("probe retry");
         HAL_Delay(50);
     }
 
@@ -168,7 +228,11 @@ static HAL_StatusTypeDef AK09916_Write(uint8_t reg, uint8_t value)
     uint8_t data;
 
     // Select Bank 3
-    ICM20948_SelectBank(3);
+    status = ICM20948_SelectBank(3);
+    if (status != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(3)", status);
+        return status;
+    }
 
     // 1) Set AK addr for write
     data = AK09916_I2C_ADDR; // write
@@ -193,7 +257,7 @@ static HAL_StatusTypeDef AK09916_Write(uint8_t reg, uint8_t value)
     HAL_Delay(10);
 
 out:
-    ICM20948_SelectBank(0);
+    (void)ICM20948_SelectBank(0);
     return status;
 }
 
@@ -203,10 +267,17 @@ static HAL_StatusTypeDef ICM20948_ReadTemp(float *temp_c)
     uint8_t raw[2];
     HAL_StatusTypeDef st;
 
-    ICM20948_SelectBank(0);
+    st = ICM20948_SelectBank(0);
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(0)", st);
+        return st;
+    }
     // Temperature registers: TEMP_OUT_H (0x39), TEMP_OUT_L (0x3A)
     st = HAL_I2C_Mem_Read(s_hi2c, ICM20948_ADDR, 0x39, 1, raw, 2, I2C_TIMEOUT_MS);
-    if (st != HAL_OK) return st;
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("Temp read", st);
+        return st;
+    }
 
     int16_t raw_temp = (int16_t)((raw[0] << 8) | raw[1]);
     
@@ -228,7 +299,11 @@ static void AK09916_Init(void)
     printf(ANSI_CYAN "[MAG] Initializing AK09916...\r\n" ANSI_RESET);
 
     // Enable I2C master
-    ICM20948_SelectBank(0);
+    status = ICM20948_SelectBank(0);
+    if (status != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(0)", status);
+        return;
+    }
     data = 0x20; // USER_CTRL I2C_MST_EN
     status = HAL_I2C_Mem_Write(s_hi2c, ICM20948_ADDR, USER_CTRL, 1, &data, 1, I2C_TIMEOUT_MS);
     if (status != HAL_OK) {
@@ -238,7 +313,11 @@ static void AK09916_Init(void)
     HAL_Delay(10);
 
     // I2C master clock
-    ICM20948_SelectBank(3);
+    status = ICM20948_SelectBank(3);
+    if (status != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(3)", status);
+        return;
+    }
     data = 0x07;
     status = HAL_I2C_Mem_Write(s_hi2c, ICM20948_ADDR, I2C_MST_CTRL, 1, &data, 1, I2C_TIMEOUT_MS);
     if (status != HAL_OK) {
@@ -267,7 +346,11 @@ static void AK09916_Init(void)
 
     // Set up SLV0 auto read of 8 bytes from ST1
     // IMPORTANT: Must be in Bank 3 to write SLV0 registers
-    ICM20948_SelectBank(3);
+    status = ICM20948_SelectBank(3);
+    if (status != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(3)", status);
+        return;
+    }
     
     uint8_t addr = 0x19; // (0x0C<<1 | 1) - AK09916 read address
     status = HAL_I2C_Mem_Write(s_hi2c, ICM20948_ADDR, I2C_SLV0_ADDR, 1, &addr, 1, I2C_TIMEOUT_MS);
@@ -290,7 +373,7 @@ static void AK09916_Init(void)
         return;
     }
 
-    ICM20948_SelectBank(0);
+    (void)ICM20948_SelectBank(0);
     printf(ANSI_GREEN "[MAG] AK09916 initialization complete (auto-read via SLV0)\r\n" ANSI_RESET);
 }
 
@@ -299,9 +382,16 @@ static HAL_StatusTypeDef ICM20948_ReadMag(float *mx, float *my, float *mz)
     uint8_t raw[8];
     HAL_StatusTypeDef st;
 
-    ICM20948_SelectBank(0);
+    st = ICM20948_SelectBank(0);
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(0)", st);
+        return st;
+    }
     st = HAL_I2C_Mem_Read(s_hi2c, ICM20948_ADDR, EXT_SLV_SENS_DATA_00, 1, raw, 8, I2C_TIMEOUT_MS);
-    if (st != HAL_OK) return st;
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("Mag read", st);
+        return st;
+    }
 
     // raw[0]=ST1 (data status), raw[1-6]=mag data (little-endian), raw[7]=ST2
     // AK09916 data format: HXL(1), HXH(2), HYL(3), HYH(4), HZL(5), HZH(6)
@@ -323,9 +413,16 @@ static HAL_StatusTypeDef ICM20948_ReadAccelGyro(float *ax, float *ay, float *az,
     uint8_t raw[14];
     HAL_StatusTypeDef st;
 
-    ICM20948_SelectBank(0);
+    st = ICM20948_SelectBank(0);
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(0)", st);
+        return st;
+    }
     st = HAL_I2C_Mem_Read(s_hi2c, ICM20948_ADDR, ACCEL_XOUT_H, 1, raw, 14, I2C_TIMEOUT_MS);
-    if (st != HAL_OK) return st;
+    if (st != HAL_OK) {
+        IMU_LogI2CFailure("AccelGyro read", st);
+        return st;
+    }
 
     int16_t iax = (int16_t)((raw[0] << 8) | raw[1]);
     int16_t iay = (int16_t)((raw[2] << 8) | raw[3]);
@@ -349,6 +446,11 @@ static HAL_StatusTypeDef ICM20948_ReadAccelGyro_Retry(float *ax, float *ay, floa
 
     HAL_Delay(2);
     st = ICM20948_ReadAccelGyro(ax, ay, az, gx, gy, gz);
+    if (st == HAL_OK) return HAL_OK;
+
+    (void)IMU_ReinitializeI2C("read retry exhausted");
+    HAL_Delay(2);
+    st = ICM20948_ReadAccelGyro(ax, ay, az, gx, gy, gz);
     return st;
 }
 
@@ -365,12 +467,18 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
 
     printf(ANSI_CYAN "[IMU] Starting ICM-20948 initialization...\r\n" ANSI_RESET);
 
+    (void)IMU_ReinitializeI2C("pre-init");
+
     if (IMU_ProbeAndSelectAddress() != HAL_OK) {
         return;
     }
 
     // --- Bank 0 ---
-    ICM20948_SelectBank(0);
+    status = ICM20948_SelectBank(0);
+    if (status != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(0)", status);
+        return;
+    }
 
     // Reset device
     printf("[IMU] Resetting device...\r\n");
@@ -418,7 +526,11 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
 
     // --- Bank 2 configs ---
     printf("[IMU] Configuring accelerometer and gyroscope...\r\n");
-    ICM20948_SelectBank(2);
+    status = ICM20948_SelectBank(2);
+    if (status != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(2)", status);
+        return;
+    }
 
     // Gyro config (reg 0x01): ±250 dps + DLPF
     {
@@ -438,7 +550,11 @@ void IMU_Init(I2C_HandleTypeDef *hi2c)
         }
     }
 
-    ICM20948_SelectBank(0);
+    status = ICM20948_SelectBank(0);
+    if (status != HAL_OK) {
+        IMU_LogI2CFailure("SelectBank(0)", status);
+        return;
+    }
 
 #if IMU_USE_MAG
     AK09916_Init();
@@ -683,6 +799,8 @@ uint8_t IMU_CheckAndRecover(void)
     s_init_ok = 0;
     s_last_ok = 0;
     s_calibrated = was_calibrated;
+
+    (void)IMU_ReinitializeI2C("recovery");
 
     IMU_Init(s_hi2c);
 

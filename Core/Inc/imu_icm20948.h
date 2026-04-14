@@ -18,7 +18,7 @@ extern "C" {
  *  Most ICM-20948 breakout boards do NOT include it. Check your module documentation.
  */
 #ifndef IMU_USE_MAG
-#define IMU_USE_MAG 0
+#define IMU_USE_MAG 1
 #endif
 
 /** @brief Latest IMU sensor reading */

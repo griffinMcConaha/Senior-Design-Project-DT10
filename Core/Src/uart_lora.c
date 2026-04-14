@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <stdbool.h>
 
 // ============================================================================
 // LoRA UART COMMUNICATION MODULE (UART 5)
@@ -668,6 +669,85 @@ static uint8_t lora_accept_command_text(const char *cmd)
                        idx, lat, lon, salt_pct, brine_pct);
             }
             return 1;
+        }
+    }
+    else if (strncmp(cmd, LORA_WP_BATCH_PREFIX ":", 4) == 0)
+    {
+        const char *payload = cmd + 4;
+        char *endptr = NULL;
+        long start_idx_long = strtol(payload, &endptr, 10);
+
+        if (endptr != payload && endptr && *endptr == ':' && start_idx_long >= 0 && start_idx_long < MAX_WAYPOINTS)
+        {
+            uint8_t idx = (uint8_t)start_idx_long;
+            uint8_t start_idx = idx;
+            uint8_t count = 0;
+            const char *cursor = endptr + 1;
+            bool parse_ok = true;
+
+            while (*cursor != '\0')
+            {
+                if (idx >= MAX_WAYPOINTS) {
+                    parse_ok = false;
+                    break;
+                }
+
+                float lat = 0.0f;
+                float lon = 0.0f;
+                int salt_pct = 0;
+                int brine_pct = 0;
+                int consumed = 0;
+
+                if (sscanf(cursor, "%f,%f,%d,%d%n", &lat, &lon, &salt_pct, &brine_pct, &consumed) != 4 || consumed <= 0) {
+                    parse_ok = false;
+                    break;
+                }
+
+                if (salt_pct < 0) salt_pct = 0;
+                if (salt_pct > 100) salt_pct = 100;
+                if (brine_pct < 0) brine_pct = 0;
+                if (brine_pct > 100) brine_pct = 100;
+
+                s_lora_wp_buf[idx].latitude = lat;
+                s_lora_wp_buf[idx].longitude = lon;
+                s_lora_wp_buf[idx].salt_rate = (float)salt_pct / 100.0f;
+                s_lora_wp_buf[idx].brine_rate = (float)brine_pct / 100.0f;
+
+                Mission_AddWaypoint(lat, lon, (uint8_t)salt_pct, (uint8_t)brine_pct);
+
+                idx++;
+                count++;
+                cursor += consumed;
+
+                if (*cursor == '\0') {
+                    break;
+                }
+                if (*cursor != ';') {
+                    parse_ok = false;
+                    break;
+                }
+                cursor++;
+            }
+
+            if (parse_ok && count > 0)
+            {
+                char ack[32];
+
+                if (idx > s_lora_wp_count) {
+                    s_lora_wp_count = idx;
+                }
+
+                strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+                lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+                snprintf(ack, sizeof(ack), "%s:%hhu:%hhu", LORA_WP_ACK_BATCH_PREFIX, start_idx, count);
+                LoRA_SendRaw(ack);
+                if (s_lora_verbose) {
+                    printf("[LORA] Staged waypoint batch start=%u count=%u\r\n",
+                           start_idx,
+                           count);
+                }
+                return 1;
+            }
         }
     }
     else if (strncmp(cmd, LORA_WP_LOAD_PREFIX ":", 7) == 0)

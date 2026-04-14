@@ -172,6 +172,14 @@ void RobotSM_RequestEstopReset(RobotSM_t *sm)
 
     sm->estop_reset_requested = true;
     sm->requested = STATE_PAUSE;
+
+    // Clear health ESTOP latch immediately so the next safety pass does not
+    // force STATE_ESTOP again before transition handling runs.
+    if (!SystemHealth_ResetEmergencyStop()) {
+        printf("[SM] ESTOP reset requested, waiting for healthy conditions\r\n");
+        return;
+    }
+
     printf("[SM] ESTOP reset requested (RESET command)\r\n");
 }
 

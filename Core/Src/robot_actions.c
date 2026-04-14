@@ -204,14 +204,14 @@ void AutonomousControl_Task(void)
         return;
     }
 
-    // Get current sensor readings
-    IMU_Status_t imu = IMU_Read();
+    // Use the debounced system health state rather than a single raw IMU sample.
+    const SystemHealthState_t *hs = SystemHealth_GetState();
     const GPS_Data_t *gps = GPS_Get();
 
-    // Check sensor health - if IMU fails, cannot determine heading
-    if (!imu.ok)
-    {
-        printf("[AUTO] ERROR: IMU not responding\r\n");
+    // Do not fault AUTO on a signle raw IMU read failure.
+    // Use the debounced IMU health state from main loop to trigger faults if needed.
+    if (hs->sensor_status[SENSOR_IMU] != SENSOR_OK) {
+        printf("[AUTO] ERROR: IMU inhealthy (debounced health state)\r\n");
         RobotSM_SetFault(&g_sm, FAULT_IMU_TIMEOUT);
         return;
     }
