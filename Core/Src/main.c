@@ -51,9 +51,9 @@
 #define RAD2DEG (57.2957795130823f)
 #define PI_F      3.14159265f
 #define TWO_PI_F  (2.0f * PI_F)
-#define MANUAL_COMMAND_HOLD_TIMEOUT_MS 220u
-#define MANUAL_DRIVE_STEP_PCT 20
-#define MANUAL_TURN_STEP_PCT 16
+#define MANUAL_COMMAND_HOLD_TIMEOUT_MS 460u
+#define MANUAL_DRIVE_STEP_PCT 12
+#define MANUAL_TURN_STEP_PCT 10
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -271,18 +271,8 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
       drive_pct = s_manual_drive_filtered_pct;
       turn_pct = s_manual_turn_filtered_pct;
 
-      const int drive_abs = abs(drive_pct);
-      const int turn_abs = abs(turn_pct);
-      if (drive_abs >= 24) {
-        if (turn_abs <= 16) {
-          turn_pct = 0;
-        } else if (turn_abs < drive_abs) {
-          turn_pct = (turn_pct * 35) / 100;
-        }
-      }
-
       const int drive_component = drive_pct;
-      const int turn_component = (turn_pct * 30) / 100;
+      const int turn_component = (turn_pct * 40) / 100;
       m1_speed = clamp_manual_output(drive_component + turn_component, -100, 100);
       m2_speed = clamp_manual_output(drive_component - turn_component, -100, 100);
       break;
