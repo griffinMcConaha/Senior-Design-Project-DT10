@@ -693,32 +693,39 @@ int main(void)
   // a bad state by the scan above - a single retry with a clean bus is enough.
   imu_ok = IMU_GetInitStatus();
   if (!imu_ok) {
-      printf(ANSI_YELLOW "WARNING: IMU initialization failed on boot - retrying in 300 ms\r\n" ANSI_RESET);
+      printf(ANSI_YELLOW "⚠ WARNING: IMU initialization failed on boot - waiting 300ms then retrying\r\n" ANSI_RESET);
       IWDG->KR = 0xAAAA;
       HAL_Delay(300);
+      printf(ANSI_CYAN "[BOOT] Retry IMU initialization (attempt 2/2)...\r\n" ANSI_RESET);
       IMU_Init(&hi2c1);
       imu_ok = IMU_GetInitStatus();
       if (!imu_ok) {
-          printf(ANSI_YELLOW "WARNING: IMU retry also failed - will attempt recovery in main loop\r\n" ANSI_RESET);
+          printf(ANSI_RED "✗ IMU initialization failed on retry - will attempt recovery in main loop\r\n" ANSI_RESET);
       }
   }
 
   printf(ANSI_GREEN "========== ROBOTIC ANTI-ICING SYSTEM BOOTING ==========\r\n" ANSI_RESET);
   
-    // IMU calibration with watchdog safety: timeout after 10 seconds
+  // IMU calibration (only if init succeeded; non-critical if skipped)
   if (imu_ok) {
-      printf(ANSI_MAGENTA "Calibrating IMU... keep board still.\r\n" ANSI_RESET);
+      printf(ANSI_MAGENTA "[BOOT] Calibrating IMU (keep board still)...\r\n" ANSI_RESET);
       uint32_t calib_start = HAL_GetTick();
-      IMU_Calibrate(500, 5);  // 500 samples, 5ms each
+      IMU_Calibrate(500, 5);  // 500 samples, 5ms each (total ~2.5 sec)
       uint32_t calib_time = HAL_GetTick() - calib_start;
+      
       if (calib_time < 10000) {  // Calibration completed within timeout
-          printf(ANSI_GREEN "IMU Calibration Complete (%lu ms).\r\n" ANSI_RESET, calib_time);
+          if (IMU_IsCalibrated()) {
+              printf(ANSI_GREEN "[IMU] ✓ Calibration Complete (%lu ms)\r\n" ANSI_RESET, calib_time);
+          } else {
+              printf(ANSI_YELLOW "[IMU] ⚠ Calibration ran but may be incomplete (%lu ms)\r\n" ANSI_RESET, calib_time);
+              imu_ok = 0;  // Mark as problematic but don't block boot
+          }
       } else {
-          printf(ANSI_YELLOW "IMU Calibration timeout - skipping.\r\n" ANSI_RESET);
-          imu_ok = 0;
+          printf(ANSI_YELLOW "[IMU] ⚠ Calibration timeout (>10s) - skipping\r\n" ANSI_RESET);
+          imu_ok = 0;  // Mark problematic, will retry in main loop
       }
   } else {
-      printf(ANSI_YELLOW "WARNING: IMU not responding - skipping calibration.\r\n" ANSI_RESET);
+      printf(ANSI_YELLOW "[BOOT] ⚠ IMU not responding - skipping calibration, will retry in main loop\r\n" ANSI_RESET);
   }
 
   // GPS fix gate: short wait to get a fix, then continue even if unavailable

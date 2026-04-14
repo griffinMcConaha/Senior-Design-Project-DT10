@@ -73,12 +73,12 @@ uint8_t SystemHealth_ResetEmergencyStop(void)
     if (!health_state.emergency_stop_active)
         return 1;  // Not in ESTOP, nothing to reset
     
-    // Check if conditions are safe for reset.
-    // GPS is intentionally NOT required here because manual operation is valid
-    // without GPS lock; requiring GPS would permanently trap recovery indoors.
+    // GPS is intentionally not required here because manual operation is valid
+    // without GPS lock; requiring GPS would trap recovery indoors.
+    // IMU unhealthy is now a warning-only condition so RESET cannot be blocked
+    // forever when the IMU is offline.
     if (health_state.sensor_status[SENSOR_IMU] != SENSOR_OK) {
-        printf(ANSI_YELLOW "[HEALTH] Cannot reset ESTOP: IMU not healthy\r\n" ANSI_RESET);
-        return 0;
+        printf(ANSI_YELLOW "[HEALTH] RESET with IMU unhealthy: continuing in degraded mode\r\n" ANSI_RESET);
     }
 
     health_state.emergency_stop_active = 0;
