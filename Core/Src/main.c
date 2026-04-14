@@ -51,7 +51,7 @@
 #define RAD2DEG (57.2957795130823f)
 #define PI_F      3.14159265f
 #define TWO_PI_F  (2.0f * PI_F)
-#define MANUAL_COMMAND_HOLD_TIMEOUT_MS 460u
+#define MANUAL_COMMAND_HOLD_TIMEOUT_MS 750u
 #define MANUAL_DRIVE_STEP_PCT 12
 #define MANUAL_TURN_STEP_PCT 10
 /* USER CODE END PD */
@@ -265,6 +265,14 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
       const int requested_drive = clamp_manual_output(LoRA_GetManualDrivePct(), -100, 100);
       const int requested_turn = clamp_manual_output(LoRA_GetManualTurnPct(), -100, 100);
 
+      if (requested_drive == 0 && requested_turn == 0) {
+        s_manual_drive_filtered_pct = 0;
+        s_manual_turn_filtered_pct = 0;
+        m1_speed = 0;
+        m2_speed = 0;
+        break;
+      } 
+
       s_manual_drive_filtered_pct = step_toward_manual_output(s_manual_drive_filtered_pct, requested_drive, MANUAL_DRIVE_STEP_PCT);
       s_manual_turn_filtered_pct = step_toward_manual_output(s_manual_turn_filtered_pct, requested_turn, MANUAL_TURN_STEP_PCT);
 
@@ -356,12 +364,29 @@ static void HandleLoRaManualCommand(LoRA_ManualCommand_t cmd)
       s_last_manual_command_ms = HAL_GetTick();
       s_manual_watchdog_stopped = 0;
       return;
+    case LORA_MANUAL_CMD_VIBRATION_ON:
+      cmd_name = "VIBRATION_ON";
+      Dispersion_SendRaw("VIBRATION ON");
+      LoRA_SendRaw("ACK:VIBRATION:ON");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
+    case LORA_MANUAL_CMD_VIBRATION_OFF:
+      cmd_name = "VIBRATION_OFF";
+      Dispersion_SendRaw("VIBRATION OFF");
+      LoRA_SendRaw("ACK:VIBRATION:OFF");
+      printf("[APP CMD RECEIVED] manual=%s\r\n", cmd_name);
+      s_last_manual_command_ms = HAL_GetTick();
+      s_manual_watchdog_stopped = 0;
+      return;
     case LORA_MANUAL_CMD_ALL_ON:
       cmd_name = "ALL_ON";
       Dispersion_SetRateDirect(100, 100);
       Dispersion_SendRaw("AGITATOR ON");
       Dispersion_SendRaw("THROWER ON");
       Dispersion_SendRaw("RELAY ON");
+      Dispersion_SendRaw("VIBRATION ON");
       Sabertooth_SetM1(100);
       Sabertooth_SetM2(100);
       LoRA_SendRaw("ACK:ALLON");
@@ -866,15 +891,20 @@ int main(void)
       }
 
       if (RobotSM_Current(&g_sm) == STATE_MANUAL) {
+        const uint32_t manual_now_ms = HAL_GetTick();
+        const uint32_t manual_elapsed_ms = (s_last_manual_command_ms == 0u || manual_now_ms < s_last_manual_command_ms)
+            ? 0u
+            : (manual_now_ms - s_last_manual_command_ms);
+
         if (s_last_manual_command_ms != 0u &&
-            (now_ms - s_last_manual_command_ms) > MANUAL_COMMAND_HOLD_TIMEOUT_MS) {
+            manual_elapsed_ms > MANUAL_COMMAND_HOLD_TIMEOUT_MS) {
           if (!s_manual_watchdog_stopped) {
             s_manual_drive_filtered_pct = 0;
             s_manual_turn_filtered_pct = 0;
             Sabertooth_StopAll();
             s_manual_watchdog_stopped = 1u;
             printf("[LoRa] Manual command stale for %lums -> stop\r\n",
-                   (unsigned long)(now_ms - s_last_manual_command_ms));
+                   (unsigned long)manual_elapsed_ms);
           }
         }
       } else {

@@ -732,6 +732,7 @@ static int Console_IsDirectSbEspControlCommand(const char *input)
     if (strncmp(upper, "AGITATOR ", 9) == 0) return 1;
     if (strncmp(upper, "THROWER ", 8) == 0) return 1;
     if (strncmp(upper, "RELAY ", 6) == 0) return 1;
+    if (strncmp(upper, "VIBRATION ", 10) == 0) return 1;
     if (strncmp(upper, "STARTUP_CHECK", 13) == 0) return 1;
     if (strncmp(upper, "STARTUP_BYPASS", 14) == 0) return 1;
     if (strncmp(upper, "PCT:", 4) == 0) return 1;
@@ -805,8 +806,9 @@ static int Console_TryHandleMixedMotorPercentCommand(const char *input)
 static void Console_ApplyFullActivationPreset(void)
 {
     Dispersion_SetTestResponseMode(1);
-    Dispersion_SendRaw("SALT:100,BRINE:100,AGITATOR ON,THROWER ON,RELAY ON");
+    Dispersion_SendRaw("SALT:100,BRINE:100,AGITATOR ON,THROWER ON,RELAY ON,VIBRATION ON");
     Dispersion_SendRaw("RELAY ON");
+    Dispersion_SendRaw("VIBRATION ON");
 
     Sabertooth_SetM1(100);
     Sabertooth_SetM2(100);
@@ -824,9 +826,10 @@ static void Console_RunMixedControlShell(RobotSM_t *sm)
     printf(ANSI_BOLD ANSI_CYAN "\r\n[DIAG] ===== MIXED CONTROL SHELL =====\r\n" ANSI_RESET);
     printf("[DIAG] Use one prompt for motors and SB-ESP controls\r\n");
     printf("[DIAG] Motor input is percent-based here: M1 30, M2 -30, or 1 30\r\n");
-    printf("[DIAG] Examples: SALT:25,BRINE:75, AGITATOR ON, THROWER OFF, RELAY ON\r\n");
+    printf("[DIAG] Examples: SALT:25,BRINE:75, AGITATOR ON, THROWER OFF, RELAY ON, VIBRATION OFF\r\n");
+    printf("[DIAG] Vibration direct control: VIBRATION ON or VIBRATION OFF\r\n");
     printf("[DIAG] Full activation preset: ALLON (or FULLON)\r\n");
-    printf("[DIAG] Chain commands with ';' or ',' for demos: M1 30; AGITATOR ON; RELAY ON\r\n");
+    printf("[DIAG] Chain commands with ';' or ',' for demos: M1 30; AGITATOR ON; RELAY ON; VIBRATION ON\r\n");
     printf("[DIAG] Press ESC at the prompt to exit back to the test menu\r\n");
     printf("[DIAG] Type HELP for normal commands, CTRLHELP for shell examples\r\n\r\n");
 
@@ -860,8 +863,9 @@ static void Console_RunMixedControlShell(RobotSM_t *sm)
             printf("[DIAG]   AGITATOR ON\r\n");
             printf("[DIAG]   THROWER OFF\r\n");
             printf("[DIAG]   RELAY ON\r\n");
+            printf("[DIAG]   VIBRATION ON\r\n");
             printf("[DIAG]   M1 30; M2 -30; AGITATOR ON\r\n");
-            printf("[DIAG]   M1 100, M2 100, BRINE:100, SALT:100, AGITATOR ON, THROWER ON, RELAY ON\r\n");
+            printf("[DIAG]   M1 100, M2 100, BRINE:100, SALT:100, AGITATOR ON, THROWER ON, RELAY ON, VIBRATION ON\r\n");
             printf("[DIAG]   ALLON\r\n");
             printf("[DIAG]   STARTUP_BYPASS\r\n");
             continue;
@@ -931,6 +935,7 @@ void Console_ShowTestMenu(void)
     printf("  A. TEST AGITATOR     - Brine agitator ON/OFF control\r\n");
     printf("  W. TEST THROWER      - Salt thrower ON/OFF control\r\n");
     printf("  O. TEST RELAY        - Sabertooth relay ON/OFF control\r\n");
+    printf("  U. TEST VIBRATION    - Vibration motor ON/OFF control\r\n");
     printf("  E. TEST SBESP SEND   - Send Salt-Brine ESP32 string\r\n");
     printf("  Q. TEST SBESP RX     - Monitor Salt-Brine ESP32 RX\r\n");
     printf("  TEST CONTROL         - Mixed motor + SB-ESP control shell\r\n");
@@ -945,7 +950,7 @@ void Console_ShowTestMenu(void)
     printf("  CTRL or TC           - Enter mixed control shell\r\n");
     printf("  S. TEST HEALTH       - Show system health snapshot\r\n");
     printf("  Type full commands too (example: TEST MOTOR 1 25)\r\n");
-    printf("  Multi-command demo: M1 30; AGITATOR ON; RELAY ON\r\n");
+    printf("  Multi-command demo: M1 30; AGITATOR ON; RELAY ON; VIBRATION ON\r\n");
     printf(ANSI_CYAN "  HELP or ?            - Show command parameters\r\n" ANSI_RESET);
     printf(ANSI_CYAN "  ESC                  - Return from live tests / prompts\r\n" ANSI_RESET);
     printf(ANSI_RED  "  EXIT                 - Resume normal operation\r\n" ANSI_RESET);
@@ -1549,7 +1554,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         Dispersion_SendRaw("AGITATOR OFF");
         Dispersion_SendRaw("THROWER OFF");
         Dispersion_SendRaw("RELAY ON");
-        printf("[DIAG] SB-ESP send menu armed: SALT=0%% BRINE=0%% AGITATOR=OFF THROWER=OFF RELAY=ON\r\n");
+        Dispersion_SendRaw("VIBRATION OFF");
+        printf("[DIAG] SB-ESP send menu armed: SALT=0%% BRINE=0%% AGITATOR=OFF THROWER=OFF RELAY=ON VIBRATION=OFF\r\n");
         printf("[DIAG] Example: PING or SALT:25,BRINE:75\r\n\r\n");
         while (1) {
             char sb_text[160] = {0};
@@ -1634,7 +1640,8 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         if (should_send_zero_on_exit) {
             Dispersion_SetRateDirect(0, 0);
               Dispersion_SendRaw("RELAY OFF");
-              printf("[DIAG] SB-ESP safe-state sent on menu exit: SALT=0%% BRINE=0%% RELAY=OFF\r\n");
+              Dispersion_SendRaw("VIBRATION OFF");
+              printf("[DIAG] SB-ESP safe-state sent on menu exit: SALT=0%% BRINE=0%% RELAY=OFF VIBRATION=OFF\r\n");
         }
 
         Dispersion_SetTestResponseMode(0);
@@ -2099,6 +2106,27 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                 Dispersion_SetTestResponseMode(0);
             } else {
                 printf("[DIAG] Usage: TEST RELAY ON  or  TEST RELAY OFF\r\n");
+            }
+            return;
+        }
+
+        // TEST VIBRATION ON/OFF
+        if (strncmp(subcmd_up, "VIBRATION", 9) == 0)
+        {
+            const char *vibration_arg = Console_SkipCommandDelims(subcmd_up + 9);
+            if (strcmp(vibration_arg, "ON") == 0 || strcmp(vibration_arg, "OFF") == 0) {
+                char vibration_cmd[28];
+                snprintf(vibration_cmd, sizeof(vibration_cmd), "VIBRATION %s", vibration_arg);
+                Dispersion_SetTestResponseMode(1);
+                Dispersion_SendRaw(vibration_cmd);
+                HAL_Delay(150);
+                const char *resp = Dispersion_GetLastStatus();
+                if (resp && resp[0] != '\0') {
+                    printf("[DIAG] SB-ESP RX: %s\r\n", resp);
+                }
+                Dispersion_SetTestResponseMode(0);
+            } else {
+                printf("[DIAG] Usage: TEST VIBRATION ON  or  TEST VIBRATION OFF\r\n");
             }
             return;
         }

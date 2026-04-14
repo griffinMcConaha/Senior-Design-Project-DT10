@@ -158,6 +158,8 @@ static const char* lora_manual_cmd_name(LoRA_ManualCommand_t cmd)
         case LORA_MANUAL_CMD_THROWER_OFF: return "THROWER_OFF";
         case LORA_MANUAL_CMD_RELAY_ON: return "RELAY_ON";
         case LORA_MANUAL_CMD_RELAY_OFF: return "RELAY_OFF";
+        case LORA_MANUAL_CMD_VIBRATION_ON: return "VIBRATION_ON";
+        case LORA_MANUAL_CMD_VIBRATION_OFF: return "VIBRATION_OFF";
         case LORA_MANUAL_CMD_TEST_SALT: return "TEST_SALT";
         case LORA_MANUAL_CMD_TEST_BRINE: return "TEST_BRINE";
         case LORA_MANUAL_CMD_NONE:
@@ -493,6 +495,14 @@ static uint8_t lora_parse_manual_request(const char *cmd, LoRA_ManualCommand_t *
     }
     if (strcmp(payload, "RELAY OFF") == 0 || strcmp(payload, "TEST RELAY OFF") == 0) {
         *out_cmd = LORA_MANUAL_CMD_RELAY_OFF;
+        return 1;
+    }
+    if (strcmp(payload, "VIBRATION ON") == 0 || strcmp(payload, "TEST VIBRATION ON") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_VIBRATION_ON;
+        return 1;
+    }
+    if (strcmp(payload, "VIBRATION OFF") == 0 || strcmp(payload, "TEST VIBRATION OFF") == 0) {
+        *out_cmd = LORA_MANUAL_CMD_VIBRATION_OFF;
         return 1;
     }
     if (strncmp(payload, "TEST SALT", 9) == 0) {
