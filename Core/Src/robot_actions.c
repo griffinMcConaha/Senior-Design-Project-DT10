@@ -175,11 +175,162 @@ static int PID_HeadingControl(float heading_error_deg)
 #define AUTO_AVOID_SIDE_NONE   0
 #define AUTO_AVOID_SIDE_LEFT  -1
 #define AUTO_AVOID_SIDE_RIGHT  1
+#define DEMO_TURN_SPEED_PCT         24
+#define DEMO_DRIVE_SPEED_PCT        30
+#define DEMO_HEADING_TOL_DEG        10.0f
+#define DEMO_LINEAR_SPEED_MPS       0.28f
+#define DEMO_MAX_SEGMENT_MS         8000u
+#define DEMO_MIN_SEGMENT_MS         300u
 
 static uint8_t avoid_phase = 0;
 static int8_t avoid_side = AUTO_AVOID_SIDE_NONE;
 static uint32_t avoid_started_ms = 0;
 static uint32_t avoid_pinch_started_ms = 0;
+static uint8_t s_demo_segment_active = 0;
+static uint8_t s_demo_turn_phase = 1;
+static uint32_t s_demo_segment_started_ms = 0;
+static uint32_t s_demo_segment_duration_ms = 0;
+static float s_demo_target_heading_deg = 0.0f;
+
+static float Demo_Normalize360(float angle)
+{
+    while (angle < 0.0f) angle += 360.0f;
+    while (angle >= 360.0f) angle -= 360.0f;
+    return angle;
+}
+
+static float Demo_LocalHeadingBetweenWaypoints(const Waypoint_t *from, const Waypoint_t *to)
+{
+    if (!from || !to) return 0.0f;
+
+    float lat_diff = (to->latitude - from->latitude) * 111000.0f;
+    float lon_diff = (to->longitude - from->longitude) * 111000.0f *
+                     cosf((from->latitude + to->latitude) * 0.5f * 3.14159f / 180.0f);
+
+    float heading = atan2f(lon_diff, lat_diff) * 180.0f / 3.14159f;
+    return Demo_Normalize360(heading);
+}
+
+static uint32_t Demo_SegmentDurationMs(const Waypoint_t *from, const Waypoint_t *to)
+{
+    if (!from || !to) return DEMO_MIN_SEGMENT_MS;
+
+    float distance_m = GPS_Distance(from->latitude, from->longitude, to->latitude, to->longitude);
+    if (distance_m < 0.05f) {
+        return DEMO_MIN_SEGMENT_MS;
+    }
+
+    float duration_ms_f = (distance_m / DEMO_LINEAR_SPEED_MPS) * 1000.0f;
+    if (duration_ms_f < (float)DEMO_MIN_SEGMENT_MS) duration_ms_f = (float)DEMO_MIN_SEGMENT_MS;
+    if (duration_ms_f > (float)DEMO_MAX_SEGMENT_MS) duration_ms_f = (float)DEMO_MAX_SEGMENT_MS;
+
+    return (uint32_t)(duration_ms_f + 0.5f);
+}
+
+static void Demo_BeginSegment(const Waypoint_t *from, const Waypoint_t *to)
+{
+    s_demo_target_heading_deg = Demo_LocalHeadingBetweenWaypoints(from, to);
+    s_demo_segment_duration_ms = Demo_SegmentDurationMs(from, to);
+    s_demo_segment_started_ms = HAL_GetTick();
+    s_demo_segment_active = 1;
+    s_demo_turn_phase = 1;
+
+    printf("[DEMO] Begin segment: heading=%.1f deg, drive=%lums\r\n",
+           s_demo_target_heading_deg,
+           (unsigned long)s_demo_segment_duration_ms);
+}
+
+static void IndoorDemoControl_Task(void)
+{
+    extern RobotSM_t g_sm;
+    extern HeadingFusion_t g_hf;
+
+    if (!g_sm.mission.waypoints || g_sm.mission.total_waypoints == 0) {
+        printf("[DEMO] ERROR: No mission loaded\r\n");
+        RobotSM_SetFault(&g_sm, FAULT_GENERIC);
+        return;
+    }
+
+    uint16_t wp_index = g_sm.mission.current_index;
+    if (wp_index >= g_sm.mission.total_waypoints) {
+        printf("[DEMO] Mission complete: all waypoints consumed\r\n");
+        Stop_Motors();
+        Dispersion_SetRate(0, 0);
+        RobotSM_Request(&g_sm, STATE_PAUSE);
+        return;
+    }
+
+    Waypoint_t *target = &g_sm.mission.waypoints[wp_index];
+
+    uint8_t salt_pct = (uint8_t)(target->salt_rate * 100.0f + 0.5f);
+    uint8_t brine_pct = (uint8_t)(target->brine_rate * 100.0f + 0.5f);
+    Dispersion_SetRate(salt_pct, brine_pct);
+
+    if (wp_index == 0) {
+        if (!RobotSM_AdvanceWaypoint(&g_sm)) {
+            printf("[DEMO] Mission complete at first waypoint\r\n");
+            Stop_Motors();
+            Dispersion_SetRate(0, 0);
+            RobotSM_Request(&g_sm, STATE_PAUSE);
+        }
+        return;
+    }
+
+    Waypoint_t *from = &g_sm.mission.waypoints[wp_index - 1];
+    Waypoint_t *to   = &g_sm.mission.waypoints[wp_index];
+
+    if (!s_demo_segment_active) {
+        Demo_BeginSegment(from, to);
+    }
+
+    float current_heading = Demo_Normalize360(g_hf.yaw_deg);
+    float heading_error = Heading_Error(s_demo_target_heading_deg, current_heading);
+    uint32_t now = HAL_GetTick();
+
+    if (s_demo_turn_phase) {
+        if (fabsf(heading_error) <= DEMO_HEADING_TOL_DEG) {
+            Stop_Motors();
+            s_demo_turn_phase = 0;
+            s_demo_segment_started_ms = now;
+            printf("[DEMO] Turn aligned, driving segment\r\n");
+            return;
+        }
+
+        if (heading_error > 0.0f) {
+            Sabertooth_SetM1(-DEMO_TURN_SPEED_PCT);
+            Sabertooth_SetM2(+DEMO_TURN_SPEED_PCT);
+        } else {
+            Sabertooth_SetM1(+DEMO_TURN_SPEED_PCT);
+            Sabertooth_SetM2(-DEMO_TURN_SPEED_PCT);
+        }
+        return;
+    }
+
+    if ((now - s_demo_segment_started_ms) >= s_demo_segment_duration_ms) {
+        Stop_Motors();
+        s_demo_segment_active = 0;
+
+        if (!RobotSM_AdvanceWaypoint(&g_sm)) {
+            printf("[DEMO] Mission complete!\r\n");
+            Stop_Motors();
+            Dispersion_SetRate(0, 0);
+            RobotSM_Request(&g_sm, STATE_PAUSE);
+        }
+        return;
+    }
+
+    int heading_trim = PID_HeadingControl(heading_error);
+    int m1_speed = DEMO_DRIVE_SPEED_PCT - heading_trim;
+    int m2_speed = DEMO_DRIVE_SPEED_PCT + heading_trim;
+
+    if (m1_speed > 100) m1_speed = 100;
+    if (m1_speed < -100) m1_speed = -100;
+    if (m2_speed > 100) m2_speed = 100;
+    if (m2_speed < -100) m2_speed = -100;
+
+    Sabertooth_SetM1(m1_speed);
+    Sabertooth_SetM2(m2_speed);
+}
 
 // Autonomous control mode: GPS path following with heading correction
 void AutonomousControl_Task(void)
@@ -196,6 +347,22 @@ void AutonomousControl_Task(void)
     // Get global state machine pointer (extern from main.c)
     extern RobotSM_t g_sm;
     
+    extern volatile uint8_t g_demo_mode_active;
+
+    if (g_demo_mode_active)
+    {
+        static uint8_t demo_once = 0;
+        if (!demo_once)
+        {
+            printf("[DEMO] Indoor demo AUTO enabled\r\n");
+            printf("[DEMO] Following waypoint segments locally (no live GPS navigation)\r\n");
+            demo_once = 1;
+        }
+
+        IndoorDemoControl_Task();
+        return;
+    }
+
     // Mission must be loaded before entering STATE_AUTO
     if (!g_sm.mission.waypoints || g_sm.mission.total_waypoints == 0)
     {

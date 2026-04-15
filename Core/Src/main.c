@@ -123,6 +123,7 @@ volatile uint32_t imu_last_update_ms = 0; // Last IMU read timestamp
 volatile uint8_t g_test_mode = 0;         // 1 = stay in test mode until reset
 static uint8_t s_disp_uart4_rx_byte = 0;
 static uint8_t s_lora_uart5_rx_byte = 0;
+volatile uint8_t g_demo_mode_active = 0;
 
 static void PrintResetCause(void)
 {
@@ -848,6 +849,13 @@ int main(void)
       // so manual control and RESET are responsive even if sensor tasks stall.
       {
         uint8_t lora_handled_fast = 0;
+        uint8_t demo_mode_enabled = 0;
+        if (LoRA_GetPendingDemoModeChange(&demo_mode_enabled)) {
+          g_demo_mode_active = demo_mode_enabled ? 1u : 0u;
+          printf("[MODE] Demo mode %s via LoRa\r\n",
+                 g_demo_mode_active ? "ENABLED" : "DISABLED");
+          lora_handled_fast = 1;
+        }
         if (LoRA_GetPendingResetRequest()) {
           uint32_t lora_age_ms = (LoRA_GetLastRxMs() > 0u) ? (now_ms - LoRA_GetLastRxMs()) : 0u;
           RobotSM_RequestEstopReset(&g_sm);

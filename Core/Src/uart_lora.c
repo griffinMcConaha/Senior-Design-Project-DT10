@@ -49,6 +49,8 @@ typedef struct {
     uint32_t manual_seq;
     uint8_t manual_seq_valid;
     uint8_t command_valid;
+    uint8_t demo_mode_enabled;
+    uint8_t demo_mode_changed;
     uint32_t invalid_command_count;
     uint32_t start_filter_drop_count;
     uint32_t prefix_reject_count;
@@ -586,6 +588,30 @@ static uint8_t lora_accept_command_text(const char *cmd)
     lora_state.command_valid = 0;
     lora_state.manual_command_valid = 0;
 
+    if (strcmp(cmd, "DEMOON") == 0)     {
+        lora_state.demo_mode_enabled = 1;
+        lora_state.demo_mode_changed = 1;
+        strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+        lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        LoRA_SendRaw("ACK:DEMOON");
+        if (s_lora_verbose) {
+            printf("[LORA] Demo mode enabled\r\n");
+        }
+        return 1;
+    }
+
+    if (strcmp(cmd, "DEMOOFF") == 0)    {
+        lora_state.demo_mode_enabled = 0;
+        lora_state.demo_mode_changed = 1;
+        strncpy(lora_state.last_command, cmd, sizeof(lora_state.last_command) - 1);
+        lora_state.last_command[sizeof(lora_state.last_command) - 1] = '\0';
+        LoRA_SendRaw("ACK:DEMOOFF");
+        if (s_lora_verbose) {
+            printf("[LORA] Demo mode disabled\r\n");
+        }
+        return 1;
+    }
+
     uint8_t parsed_state_cmd = lora_parse_state_request(cmd, &lora_state.pending_state_request);
     if (parsed_state_cmd == 1)
     {
@@ -893,6 +919,8 @@ void LoRA_Init(UART_HandleTypeDef *huart5)
     lora_state.manual_turn_pct = 0;
     lora_state.manual_seq = 0;
     lora_state.manual_seq_valid = 0;
+    lora_state.demo_mode_enabled = 0;
+    lora_state.demo_mode_changed = 0;
     lora_state.invalid_command_count = 0;
     lora_state.start_filter_drop_count = 0;
     lora_state.prefix_reject_count = 0;
@@ -1362,6 +1390,25 @@ uint8_t LoRA_GetPendingManualCommand(LoRA_ManualCommand_t *out_cmd)
     {
         *out_cmd = lora_state.pending_manual_cmd;
         lora_state.manual_command_valid = 0;
+        return 1;
+    }
+
+    return 0;
+}
+
+uint8_t LoRA_IsDemoModeEnabled(void)
+{
+    return lora_state.demo_mode_enabled;
+}
+
+uint8_t LoRA_GetPendingDemoModeChange(uint8_t *out_enabled)
+{
+    if (!out_enabled) return 0;
+
+    if (lora_state.demo_mode_changed)
+    {
+        *out_enabled = lora_state.demo_mode_enabled;
+        lora_state.demo_mode_changed = 0;
         return 1;
     }
 

@@ -11,6 +11,7 @@
 #define ANSI_MAGENTA  "\033[35m"
 #define ANSI_RESET    "\033[0m"
 
+extern volatile uint8_t g_demo_mode_active;
 // ============================================================================
 // SYSTEM HEALTH STATE
 // ============================================================================
@@ -237,7 +238,7 @@ uint8_t SystemHealth_SafetyCheck(const SystemHealthInputs_t *in,
     // with their own eyes. Enforcing ERROR here would make manual LoRa driving
     // permanently impossible without an outdoor GPS fix.
     if (!in->gps_fix) {
-        if (current == STATE_AUTO) {
+        if (current == STATE_AUTO && !g_demo_mode_active) {
             *out_request_state = STATE_ERROR;
             return 1;
         }
