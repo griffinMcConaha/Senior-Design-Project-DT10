@@ -384,6 +384,7 @@ static HAL_StatusTypeDef IMU_ProbeAndSelectAddress(void)
     printf(ANSI_RED "[IMU] ✗ Device not found at 0x68 or 0x69 after 5 attempts\r\n" ANSI_RESET);
     IMU_DiagnosticBusScan();
     return HAL_ERROR;
+}
 
 // Set IMU I2C address (must be called before IMU_Init)
 void IMU_SetAddress(uint8_t addr_7bit)

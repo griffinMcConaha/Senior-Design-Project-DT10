@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define MISSION_FORMAT_VERSION 1
-#define MAX_WAYPOINTS 50
+#define MAX_WAYPOINTS 120
 
 typedef struct {
     char name[32];

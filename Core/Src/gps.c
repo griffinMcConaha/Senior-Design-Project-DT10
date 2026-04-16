@@ -24,6 +24,9 @@
 #define GPS_UART_ACTIVE_MS 1200u
 #define GPS_RECOVERY_LOG_THROTTLE_MS 10000u
 #define GPS_AUTO_BAUD_LOG_THROTTLE_MS 15000u
+#define GPS_AUTO_BAUD_LOCK_MIN_LINES 3u
+#define GPS_TX_TIMEOUT_MS 200u
+#define GPS_BOOT_CONFIG_DELAY_MS 250u
 
 // Module-level UART handle and receive buffer
 static UART_HandleTypeDef *s_huart = NULL;
@@ -48,6 +51,7 @@ static volatile uint32_t s_nmea_unknown_count = 0;
 static const uint32_t s_gps_baud_table[] = {9600u, 38400u, 57600u, 115200u};
 static uint8_t s_gps_baud_index = 0;
 static volatile uint8_t s_auto_baud_runtime_enabled = GPS_AUTO_BAUD_ENABLED ? 1u : 0u;
+static volatile uint8_t s_auto_baud_locked = 0u;
 static uint32_t s_last_recovery_log_ms = 0;
 static uint32_t s_last_auto_baud_log_ms = 0;
 
@@ -75,10 +79,37 @@ static void GPS_UpdateFixState(void)
     s_gps.has_fix = (s_rmc_fix_valid || s_gga_fix_valid || s_gsa_fix_valid) ? 1u : 0u;
 }
 
+static void GPS_SendCommand(const char *cmd)
+{
+    if (!s_huart || !cmd || !*cmd) {
+        return;
+    }
+
+    (void)HAL_UART_Transmit(s_huart, (uint8_t *)cmd, (uint16_t)strlen(cmd), GPS_TX_TIMEOUT_MS);
+}
+
+static void GPS_SendStartupConfig(void)
+{
+    if (!s_huart) {
+        return;
+    }
+
+    HAL_Delay(GPS_BOOT_CONFIG_DELAY_MS);
+
+    // Adafruit Ultimate GPS uses the MTK/PMTK command set.
+    // Keep the stream small and stable for this parser: RMC + GGA + GSA at 1 Hz.
+    GPS_SendCommand("$PMTK220,1000*1F\r\n");
+    HAL_Delay(60);
+    GPS_SendCommand("$PMTK314,0,1,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0*29\r\n");
+    HAL_Delay(60);
+    GPS_SendCommand("$PGCMD,33,0*6D\r\n");
+}
+
 static void GPS_SwitchToBaud(uint32_t baud)
 {
     if (!s_huart) return;
 
+    s_auto_baud_locked = 0u;
     HAL_UART_AbortReceive_IT(s_huart);
     __HAL_UART_CLEAR_OREFLAG(s_huart);
     (void)HAL_UART_DeInit(s_huart);
@@ -103,9 +134,20 @@ static void GPS_AutoBaudTick(uint32_t now_ms)
 
     if (!s_huart) return;
 
-    // If valid NMEA lines are arriving recently, keep current baud.
-    if (s_last_nmea_ms != 0u && (now_ms - s_last_nmea_ms) <= GPS_NMEA_SILENT_SWITCH_MS) {
+    const uint8_t recentNmea = (s_last_nmea_ms != 0u && (now_ms - s_last_nmea_ms) <= GPS_NMEA_SILENT_SWITCH_MS) ? 1u : 0u;
+    if (recentNmea) {
+        if (!s_auto_baud_locked && s_nmea_line_count >= GPS_AUTO_BAUD_LOCK_MIN_LINES) {
+            s_auto_baud_locked = 1u;
+            GPS_LogThrottled(&s_last_auto_baud_log_ms, GPS_AUTO_BAUD_LOG_THROTTLE_MS,
+                             "[GPS] Auto-baud locked at %lu\r\n", (unsigned long)s_gps_baud_table[s_gps_baud_index]);
+        }
         return;
+    }
+
+    if (s_auto_baud_locked) {
+        s_auto_baud_locked = 0u;
+        GPS_LogThrottled(&s_last_auto_baud_log_ms, GPS_AUTO_BAUD_LOG_THROTTLE_MS,
+                         "[GPS] Auto-baud lost signal, resuming scan\r\n");
     }
 
     if ((now_ms - s_last_baud_switch_ms) < GPS_BAUD_SWITCH_COOLDOWN_MS) {
@@ -352,6 +394,7 @@ void GPS_Init(UART_HandleTypeDef *huart)
     s_gsa_fix_valid = 0;
     s_nmea_line_count = 0;
     s_nmea_unknown_count = 0;
+    s_auto_baud_locked = 0u;
 
     if (s_huart) {
         uint32_t configured_baud = s_huart->Init.BaudRate;
@@ -365,6 +408,10 @@ void GPS_Init(UART_HandleTypeDef *huart)
 
     // Start RX interrupt for 1 byte
     HAL_UART_Receive_IT(s_huart, &s_rx_byte, 1);
+
+    // Configure the Adafruit Ultimate GPS for a compact, parser-friendly NMEA stream.
+    GPS_SendStartupConfig();
+    GPS_SetAutoBaudEnabled(1u);
 }
 
 uint32_t GPS_GetRxByteCount(void)
@@ -512,6 +559,7 @@ uint8_t GPS_CheckAndRecover(void)
     GPS_LogThrottled(&s_last_recovery_log_ms, GPS_RECOVERY_LOG_THROTTLE_MS,
                      "[GPS] Recovery: Parser stalled, resetting...\r\n");
     GPS_Reset();
+    s_auto_baud_locked = 0u;
     __HAL_UART_CLEAR_OREFLAG(s_huart);
 
     // If bytes have never flowed (or have been stale for a long time),
