@@ -786,9 +786,9 @@ int main(void)
       startup_mode_sent = 1;
       printf("[DISP] Startup check bypassed (test mode active)\r\n");
     } else {
-      Dispersion_RequestStartupCheck();
+      Dispersion_BypassStartupCheck();
       startup_mode_sent = 1;
-      printf("[DISP] Startup check requested (normal mode)\r\n");
+      printf("[DISP] Startup check bypassed (normal mode default)\r\n");
     }
 
   while (1)

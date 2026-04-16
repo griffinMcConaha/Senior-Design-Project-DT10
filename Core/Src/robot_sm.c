@@ -303,20 +303,15 @@ void RobotSM_HandleTransitions(RobotSM_t *sm)
         Emergency_Stop_ResetOnce();
     }
 
-    // SAFETY RULE 2: Cannot transition directly from ERROR to MANUAL/AUTO
-    // Must go through PAUSE intermediate state.
-    if ((from == STATE_ERROR) &&
-        (to == STATE_MANUAL || to == STATE_AUTO))
-    {
-        printf("[SM] SAFETY: Cannot go directly from %s to %s (must use PAUSE as intermediate)\r\n",
-               StateToString(from), StateToString(to));
-        return;
-    }
-
-    // SAFETY RULE 3: Allow recovery from ERROR via PAUSE
-    if (from == STATE_ERROR && to == STATE_PAUSE)
+    // Operator-commanded recovery from ERROR is allowed directly so field
+    // commands do not get silently blocked once a recoverable fault has been
+    // latched. ESTOP remains the only hard latch.
+    if (from == STATE_ERROR &&
+        (to == STATE_MANUAL || to == STATE_AUTO || to == STATE_PAUSE))
     {
         RobotSM_ClearFault(sm);
+        printf("[SM] Recovery command accepted: %s -> %s\r\n",
+               StateToString(from), StateToString(to));
     }
 
     // SAFETY RULE 4: Exiting ESTOP through PAUSE clears latch

@@ -203,45 +203,29 @@ void SystemHealth_PrintReport(void)
 // LEGACY SAFETY CHECK (kept for compatibility)
 // ============================================================================
 
-// Safety priority check: determines if state change is needed based on sensor health
-// Priority: ESTOP > IMU failure > GPS loss
+// Safety priority check: determines if a state change is needed based on
+// hard safety inputs. Sensor degradation is now warning-only so commanded
+// movement from the app/LoRa path is not blocked indoors.
 uint8_t SystemHealth_SafetyCheck(const SystemHealthInputs_t *in,
                                  RobotState_t current,
                                  RobotState_t *out_request_state)
 {
-    // Update sensor health from inputs
+    (void)current;
+    (void)out_request_state;
+
+    // Update sensor health from inputs for reporting/LEDs only.
     SystemHealth_SetSensorStatus(SENSOR_IMU, in->imu_ok ? SENSOR_OK : SENSOR_TIMEOUT);
     SystemHealth_SetSensorStatus(SENSOR_GPS, in->gps_fix ? SENSOR_OK : SENSOR_TIMEOUT);
     
-    // Highest priority: ESTOP button or already active
+    // Only a real ESTOP input or an already-latched ESTOP is allowed to
+    // force drivetrain shutdown here. IMU/GPS issues remain visible but do
+    // not block motion commands.
     if (in->estop_button || health_state.emergency_stop_active) {
         *out_request_state = STATE_ESTOP;
         if (!health_state.emergency_stop_active) {
             SystemHealth_TriggerEmergencyStop("ESTOP button pressed");
         }
         return 1;
-    }
-
-    // Next: IMU failure => ESTOP only in autonomous mode.
-    // In manual/pause, allow operation with degraded sensor status and
-    // communicate degradation upstream; do not force an ESTOP loop.
-    if (!in->imu_ok) {
-        if (current == STATE_AUTO) {
-            *out_request_state = STATE_ESTOP;
-            SystemHealth_TriggerEmergencyStop("IMU failure - cannot navigate safely");
-            return 1;
-        }
-    }
-
-    // GPS no-fix => ERROR only when running autonomously.
-    // Manual and Pause states do not need GPS — a human operator can drive
-    // with their own eyes. Enforcing ERROR here would make manual LoRa driving
-    // permanently impossible without an outdoor GPS fix.
-    if (!in->gps_fix) {
-        if (current == STATE_AUTO && !g_demo_mode_active) {
-            *out_request_state = STATE_ERROR;
-            return 1;
-        }
     }
 
     return 0;
@@ -254,17 +238,14 @@ void SystemHealth_UpdateLeds(RobotState_t state, uint8_t imu_ok, uint8_t gps_fix
 
     /* LED Status:
        - ESTOP/ERROR => red (LD5)
-       - IMU bad => orange (LD3)
-       - no GPS fix => red (LD5)
+       - IMU or GPS degraded => orange (LD3)
        - else => green (LD4)
     */
 
     if (state == STATE_ESTOP || state == STATE_ERROR) {
         HAL_GPIO_WritePin(GPIOD, LD5_Pin, GPIO_PIN_SET);
-    } else if (!imu_ok) {
+    } else if (!imu_ok || !gps_fix) {
         HAL_GPIO_WritePin(GPIOD, LD3_Pin, GPIO_PIN_SET);
-    } else if (!gps_fix) {
-        HAL_GPIO_WritePin(GPIOD, LD5_Pin, GPIO_PIN_SET);
     } else {
         HAL_GPIO_WritePin(GPIOD, LD4_Pin, GPIO_PIN_SET);
     }

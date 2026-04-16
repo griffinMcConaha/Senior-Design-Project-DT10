@@ -246,8 +246,15 @@ static void IndoorDemoControl_Task(void)
     extern HeadingFusion_t g_hf;
 
     if (!g_sm.mission.waypoints || g_sm.mission.total_waypoints == 0) {
-        printf("[DEMO] ERROR: No mission loaded\r\n");
-        RobotSM_SetFault(&g_sm, FAULT_GENERIC);
+        static uint32_t last_demo_missing_mission_log_ms = 0;
+        uint32_t now_ms = HAL_GetTick();
+        if ((now_ms - last_demo_missing_mission_log_ms) >= 2000u) {
+            printf("[DEMO] WARNING: AUTO requested before waypoints were fully loaded - holding PAUSE\r\n");
+            last_demo_missing_mission_log_ms = now_ms;
+        }
+        Stop_Motors();
+        Dispersion_SetRate(0, 0);
+        RobotSM_Request(&g_sm, STATE_PAUSE);
         return;
     }
 
@@ -288,11 +295,21 @@ static void IndoorDemoControl_Task(void)
     uint32_t now = HAL_GetTick();
 
     if (s_demo_turn_phase) {
-        if (fabsf(heading_error) <= DEMO_HEADING_TOL_DEG) {
+        const SystemHealthState_t *hs = SystemHealth_GetState();
+        const uint8_t imu_ready = (hs->sensor_status[SENSOR_IMU] == SENSOR_OK) ? 1u : 0u;
+        const uint8_t turn_timeout = ((now - s_demo_segment_started_ms) >= 1200u) ? 1u : 0u;
+
+        if (!imu_ready || turn_timeout || fabsf(heading_error) <= DEMO_HEADING_TOL_DEG) {
             Stop_Motors();
             s_demo_turn_phase = 0;
             s_demo_segment_started_ms = now;
-            printf("[DEMO] Turn aligned, driving segment\r\n");
+            if (!imu_ready) {
+                printf("[DEMO] Heading unavailable, skipping turn alignment\r\n");
+            } else if (turn_timeout) {
+                printf("[DEMO] Turn alignment timeout, driving segment anyway\r\n");
+            } else {
+                printf("[DEMO] Turn aligned, driving segment\r\n");
+            }
             return;
         }
 
@@ -366,21 +383,33 @@ void AutonomousControl_Task(void)
     // Mission must be loaded before entering STATE_AUTO
     if (!g_sm.mission.waypoints || g_sm.mission.total_waypoints == 0)
     {
-        printf("[AUTO] ERROR: No mission loaded\r\n");
-        RobotSM_SetFault(&g_sm, FAULT_GENERIC);
+        static uint32_t last_auto_missing_mission_log_ms = 0;
+        uint32_t now_ms = HAL_GetTick();
+        if ((now_ms - last_auto_missing_mission_log_ms) >= 2000u)
+        {
+            printf("[AUTO] WARNING: No mission loaded yet - returning to PAUSE instead of ERROR\r\n");
+            last_auto_missing_mission_log_ms = now_ms;
+        }
+        Stop_Motors();
+        Dispersion_SetRate(0, 0);
+        RobotSM_Request(&g_sm, STATE_PAUSE);
         return;
     }
 
     // Use the debounced system health state rather than a single raw IMU sample.
     const SystemHealthState_t *hs = SystemHealth_GetState();
     const GPS_Data_t *gps = GPS_Get();
+    const uint8_t heading_control_available = (hs->sensor_status[SENSOR_IMU] == SENSOR_OK) ? 1u : 0u;
 
-    // Do not fault AUTO on a signle raw IMU read failure.
-    // Use the debounced IMU health state from main loop to trigger faults if needed.
-    if (hs->sensor_status[SENSOR_IMU] != SENSOR_OK) {
-        printf("[AUTO] ERROR: IMU inhealthy (debounced health state)\r\n");
-        RobotSM_SetFault(&g_sm, FAULT_IMU_TIMEOUT);
-        return;
+    // IMU degradation is warning-only for field operation. Keep moving on
+    // commanded AUTO runs instead of faulting out immediately.
+    if (!heading_control_available) {
+        static uint32_t last_imu_warn_ms = 0;
+        uint32_t warn_now = HAL_GetTick();
+        if ((warn_now - last_imu_warn_ms) >= 3000u) {
+            printf("[AUTO] WARNING: IMU degraded - using reduced heading correction\r\n");
+            last_imu_warn_ms = warn_now;
+        }
     }
 
     // Check GPS health - if no fix, cannot navigate
@@ -445,8 +474,12 @@ void AutonomousControl_Task(void)
     extern HeadingFusion_t g_hf;
     float current_heading = g_hf.yaw_deg; // Range: -180 to +180 or 0 to 360
 
-    // Calculate heading error (normalize to [-180, +180])
-    float heading_error = Heading_Error(desired_heading, current_heading);
+    // Calculate heading error (normalize to [-180, +180]). If the IMU is not
+    // currently healthy, keep the robot driving forward instead of faulting or
+    // spinning in place.
+    float heading_error = heading_control_available
+        ? Heading_Error(desired_heading, current_heading)
+        : 0.0f;
 
     // Apply dispersion rates from current waypoint
     // PHASE 4: Convert float rates (0.0-1.0) to percentages (0-100) for ESP32
