@@ -96,6 +96,10 @@ uint8_t LoRA_GetPendingResetRequest(void);
 // Returns: 1 if command available, 0 otherwise
 uint8_t LoRA_GetPendingManualCommand(LoRA_ManualCommand_t *out_cmd);
 
+// Demo mode helpers
+uint8_t LoRA_IsDemoModeEnabled(void);
+uint8_t LoRA_GetPendingDemoModeChange(uint8_t *out_enabled);
+
 // Get the latest joystick-style drive/turn request percentages [-100..100]
 int LoRA_GetManualDrivePct(void);
 int LoRA_GetManualTurnPct(void);

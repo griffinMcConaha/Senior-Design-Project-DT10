@@ -428,8 +428,9 @@ void Dispersion_Task(void)
         uint32_t elapsed = now - disp_state.startup_check_started_ms;
         if (elapsed > disp_state.startup_check_timeout_ms)
         {
-            printf("[DISP] ERROR: Startup check timeout! (elapsed=%u ms, timeout=%u ms)\r\n", 
-                   elapsed, disp_state.startup_check_timeout_ms);
+            printf("[DISP] ERROR: Startup check timeout! (elapsed=%lu ms, timeout=%lu ms)\r\n",
+                   (unsigned long)elapsed,
+                   (unsigned long)disp_state.startup_check_timeout_ms);
             printf("[DISP] Auto-completing startup check (may indicate ESP32 hang)\r\n");
             disp_state.startup_check_in_progress = 0;
             disp_state.startup_check_completed = 1;

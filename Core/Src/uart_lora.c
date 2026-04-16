@@ -645,7 +645,7 @@ static uint8_t lora_accept_command_text(const char *cmd)
         }
         return 1;
     }
-    else if (strcmp(cmd, LORA_WP_CLEAR) == 0)
+    else if (strcmp(cmd, LORA_WP_CLEAR) == 0 || strcmp(cmd, LORA_WP_CLEAR_ALIAS) == 0)
     {
         memset(s_lora_wp_buf, 0, sizeof(s_lora_wp_buf));
         s_lora_wp_count = 0;
@@ -659,15 +659,16 @@ static uint8_t lora_accept_command_text(const char *cmd)
         }
         return 1;
     }
-    else if (strncmp(cmd, LORA_WP_ADD_PREFIX ":", 3) == 0)
+    else if (strncmp(cmd, LORA_WP_ADD_PREFIX ":", 3) == 0 || strncmp(cmd, LORA_WP_ADD_ALIAS_PREFIX ":", 2) == 0)
     {
+        const char *payload = (strncmp(cmd, LORA_WP_ADD_PREFIX ":", 3) == 0) ? (cmd + 3) : (cmd + 2);
         uint8_t idx = 0;
         float lat = 0.0f;
         float lon = 0.0f;
         int salt_pct = 0;
         int brine_pct = 0;
 
-        if (sscanf(cmd + 3, "%hhu:%f,%f,%d,%d", &idx, &lat, &lon, &salt_pct, &brine_pct) == 5 && idx < MAX_WAYPOINTS)
+        if (sscanf(payload, "%hhu:%f,%f,%d,%d", &idx, &lat, &lon, &salt_pct, &brine_pct) == 5 && idx < MAX_WAYPOINTS)
         {
             char ack[24];
 
@@ -697,9 +698,9 @@ static uint8_t lora_accept_command_text(const char *cmd)
             return 1;
         }
     }
-    else if (strncmp(cmd, LORA_WP_BATCH_PREFIX ":", 4) == 0)
+    else if (strncmp(cmd, LORA_WP_BATCH_PREFIX ":", 4) == 0 || strncmp(cmd, LORA_WP_BATCH_ALIAS_PREFIX ":", 3) == 0)
     {
-        const char *payload = cmd + 4;
+        const char *payload = (strncmp(cmd, LORA_WP_BATCH_PREFIX ":", 4) == 0) ? (cmd + 4) : (cmd + 3);
         char *endptr = NULL;
         long start_idx_long = strtol(payload, &endptr, 10);
 
@@ -776,10 +777,11 @@ static uint8_t lora_accept_command_text(const char *cmd)
             }
         }
     }
-    else if (strncmp(cmd, LORA_WP_LOAD_PREFIX ":", 7) == 0)
+    else if (strncmp(cmd, LORA_WP_LOAD_PREFIX ":", 7) == 0 || strncmp(cmd, LORA_WP_LOAD_ALIAS_PREFIX ":", 3) == 0)
     {
+        const char *payload = (strncmp(cmd, LORA_WP_LOAD_PREFIX ":", 7) == 0) ? (cmd + 7) : (cmd + 3);
         uint8_t count = 0;
-        if (sscanf(cmd + 7, "%hhu", &count) == 1 && count > 0 && count == s_lora_wp_count)
+        if (sscanf(payload, "%hhu", &count) == 1 && count > 0 && count == s_lora_wp_count)
         {
             char ack[28];
 
