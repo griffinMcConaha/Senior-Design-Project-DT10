@@ -76,7 +76,17 @@ static void GPS_LogThrottled(uint32_t *last_log_ms, uint32_t throttle_ms, const 
 
 static void GPS_UpdateFixState(void)
 {
-    s_gps.has_fix = (s_rmc_fix_valid || s_gga_fix_valid || s_gsa_fix_valid) ? 1u : 0u;
+    uint8_t explicit_fix = (s_rmc_fix_valid || s_gga_fix_valid || s_gsa_fix_valid) ? 1u : 0u;
+    uint8_t coordinate_fix = 0u;
+
+    if (!explicit_fix) {
+        const uint8_t has_position = (s_gps.latitude_deg != 0.0f || s_gps.longitude_deg != 0.0f) ? 1u : 0u;
+        const uint8_t enough_satellites = (s_gps.num_satellites >= 3u) ? 1u : 0u;
+        const uint8_t usable_dop = (s_gps.hdop > 0.0f && s_gps.hdop <= 6.5f) ? 1u : 0u;
+        coordinate_fix = (has_position && enough_satellites && usable_dop) ? 1u : 0u;
+    }
+
+    s_gps.has_fix = (explicit_fix || coordinate_fix) ? 1u : 0u;
 }
 
 static void GPS_SendCommand(const char *cmd)

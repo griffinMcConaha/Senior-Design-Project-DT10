@@ -800,8 +800,9 @@ int main(void)
       (void)PollConsoleUart2(&g_sm, 0);
       
 	  uint32_t now_ms = HAL_GetTick();
-    // Keep GPS parser active, but disable baud hopping in direct manual mode.
-    GPS_SetAutoBaudEnabled((RobotSM_Current(&g_sm) == STATE_MANUAL) ? 0u : 1u);
+    // Keep GPS auto-baud and parser recovery active in all modes so the STM
+    // continues to see a valid lock whenever the GPS module is actually fixed.
+    GPS_SetAutoBaudEnabled(1u);
     GPS_Tick(now_ms);
 	  const GPS_Data_t *gps = GPS_Get();
 
@@ -1077,27 +1078,13 @@ int main(void)
                 }
           }
 
-          // State machine task dispatch (Phase 2 and 3)
+          // State-specific control is already dispatched inside RobotSM_Update().
+          // Keep only the extra dispersion housekeeping here so AUTO handlers
+          // are not executed twice per main-loop pass.
           RobotState_t current_state = RobotSM_Current(&g_sm);
-          switch (current_state)
+          if (current_state == STATE_AUTO)
           {
-              case STATE_MANUAL:
-                  ManualControl_Task();
-                  break;
-              case STATE_AUTO:
-                  AutonomousControl_Task();
-                  Dispersion_Task(); // Monitor salt/brine ratios in auto mode
-                  break;
-              case STATE_ERROR:
-                  Handle_Error();
-                  break;
-              case STATE_ESTOP:
-                  Emergency_Stop();
-                  break;
-              case STATE_PAUSE:
-              default:
-                  // Paused - motors idle
-                  break;
+              Dispersion_Task(); // Monitor salt/brine ratios in auto mode
           }
 
           // Update LoRA periodic tasks (timeout checking, etc.)

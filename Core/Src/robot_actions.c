@@ -191,6 +191,10 @@ static uint8_t s_demo_turn_phase = 1;
 static uint32_t s_demo_segment_started_ms = 0;
 static uint32_t s_demo_segment_duration_ms = 0;
 static float s_demo_target_heading_deg = 0.0f;
+static uint32_t s_waiting_for_mission_since_ms = 0;
+static uint8_t s_waiting_for_sync_idle_applied = 0;
+#define AUTO_MISSION_SYNC_GRACE_MS 6000u
+#define AUTO_NO_MISSION_DRIVE_PCT 24
 
 static float Demo_Normalize360(float angle)
 {
@@ -248,15 +252,50 @@ static void IndoorDemoControl_Task(void)
     if (!g_sm.mission.waypoints || g_sm.mission.total_waypoints == 0) {
         static uint32_t last_demo_missing_mission_log_ms = 0;
         uint32_t now_ms = HAL_GetTick();
-        if ((now_ms - last_demo_missing_mission_log_ms) >= 2000u) {
-            printf("[DEMO] WARNING: AUTO requested before waypoints were fully loaded - holding PAUSE\r\n");
-            last_demo_missing_mission_log_ms = now_ms;
+        uint16_t staged_count = Mission_GetWaypointCount();
+
+        if (staged_count > 0u) {
+            RobotSM_LoadMission(&g_sm, Mission_GetWaypoints(), staged_count);
+            s_waiting_for_mission_since_ms = 0u;
+            s_waiting_for_sync_idle_applied = 0u;
+            printf("[DEMO] Recovered %u staged waypoints directly on STM\r\n", staged_count);
+        } else {
+            if (s_waiting_for_mission_since_ms == 0u) {
+                s_waiting_for_mission_since_ms = now_ms;
+            }
+            if ((now_ms - last_demo_missing_mission_log_ms) >= 2000u) {
+                printf("[DEMO] WARNING: Waiting for waypoint sync before motion\r\n");
+                last_demo_missing_mission_log_ms = now_ms;
+            }
+            if (!s_waiting_for_sync_idle_applied) {
+                Stop_Motors();
+                Dispersion_SetRate(0, 0);
+                s_waiting_for_sync_idle_applied = 1u;
+            }
+            if ((now_ms - s_waiting_for_mission_since_ms) >= AUTO_MISSION_SYNC_GRACE_MS) {
+                static uint32_t last_demo_wait_log_ms = 0;
+                const uint16_t prox_left = Proximity_ReadLeft();
+                const uint16_t prox_right = Proximity_ReadRight();
+                const uint8_t left_blocked = (Proximity_GetStatus(prox_left) >= 2u) ? 1u : 0u;
+                const uint8_t right_blocked = (Proximity_GetStatus(prox_right) >= 2u) ? 1u : 0u;
+
+                if (left_blocked || right_blocked) {
+                    Stop_Motors();
+                } else {
+                    Sabertooth_SetM1(AUTO_NO_MISSION_DRIVE_PCT);
+                    Sabertooth_SetM2(AUTO_NO_MISSION_DRIVE_PCT);
+                }
+
+                if ((now_ms - last_demo_wait_log_ms) >= 3000u) {
+                    printf("[DEMO] No synced path yet - using straight fallback drive\r\n");
+                    last_demo_wait_log_ms = now_ms;
+                }
+            }
+            return;
         }
-        Stop_Motors();
-        Dispersion_SetRate(0, 0);
-        RobotSM_Request(&g_sm, STATE_PAUSE);
-        return;
     }
+    s_waiting_for_mission_since_ms = 0u;
+    s_waiting_for_sync_idle_applied = 0u;
 
     uint16_t wp_index = g_sm.mission.current_index;
     if (wp_index >= g_sm.mission.total_waypoints) {
@@ -385,16 +424,59 @@ void AutonomousControl_Task(void)
     {
         static uint32_t last_auto_missing_mission_log_ms = 0;
         uint32_t now_ms = HAL_GetTick();
-        if ((now_ms - last_auto_missing_mission_log_ms) >= 2000u)
+        uint16_t staged_count = Mission_GetWaypointCount();
+
+        if (staged_count > 0u)
         {
-            printf("[AUTO] WARNING: No mission loaded yet - returning to PAUSE instead of ERROR\r\n");
-            last_auto_missing_mission_log_ms = now_ms;
+            RobotSM_LoadMission(&g_sm, Mission_GetWaypoints(), staged_count);
+            s_waiting_for_mission_since_ms = 0u;
+            s_waiting_for_sync_idle_applied = 0u;
+            printf("[AUTO] Recovered %u staged waypoints directly on STM\r\n", staged_count);
         }
-        Stop_Motors();
-        Dispersion_SetRate(0, 0);
-        RobotSM_Request(&g_sm, STATE_PAUSE);
-        return;
+        else
+        {
+            if (s_waiting_for_mission_since_ms == 0u) {
+                s_waiting_for_mission_since_ms = now_ms;
+            }
+            if ((now_ms - last_auto_missing_mission_log_ms) >= 2000u)
+            {
+                printf("[AUTO] WARNING: Waiting for waypoint sync before motion\r\n");
+                last_auto_missing_mission_log_ms = now_ms;
+            }
+            if (!s_waiting_for_sync_idle_applied) {
+                Stop_Motors();
+                Dispersion_SetRate(0, 0);
+                s_waiting_for_sync_idle_applied = 1u;
+            }
+            if ((now_ms - s_waiting_for_mission_since_ms) >= AUTO_MISSION_SYNC_GRACE_MS)
+            {
+                static uint32_t last_auto_wait_log_ms = 0;
+                const uint16_t prox_left = Proximity_ReadLeft();
+                const uint16_t prox_right = Proximity_ReadRight();
+                const uint8_t left_blocked = (Proximity_GetStatus(prox_left) >= 2u) ? 1u : 0u;
+                const uint8_t right_blocked = (Proximity_GetStatus(prox_right) >= 2u) ? 1u : 0u;
+
+                if (left_blocked || right_blocked)
+                {
+                    Stop_Motors();
+                }
+                else
+                {
+                    Sabertooth_SetM1(AUTO_NO_MISSION_DRIVE_PCT);
+                    Sabertooth_SetM2(AUTO_NO_MISSION_DRIVE_PCT);
+                }
+
+                if ((now_ms - last_auto_wait_log_ms) >= 3000u)
+                {
+                    printf("[AUTO] No synced path yet - using straight fallback drive\r\n");
+                    last_auto_wait_log_ms = now_ms;
+                }
+            }
+            return;
+        }
     }
+    s_waiting_for_mission_since_ms = 0u;
+    s_waiting_for_sync_idle_applied = 0u;
 
     // Use the debounced system health state rather than a single raw IMU sample.
     const SystemHealthState_t *hs = SystemHealth_GetState();

@@ -11,6 +11,7 @@
 // ============================================================================
 
 #define DISP_RX_BUFFER_SIZE 128
+#define DISP_RATE_RESEND_MS 1500u
 
 typedef struct {
     UART_HandleTypeDef *huart;  // UART 4 handle
@@ -139,6 +140,13 @@ void Dispersion_SetRate(uint8_t salt_rate, uint8_t brine_rate)
     if (salt_rate > 100) salt_rate = 100;
     if (brine_rate > 100) brine_rate = 100;
 
+    uint32_t now_ms = HAL_GetTick();
+    if (disp_state.salt_rate_percent == salt_rate &&
+        disp_state.brine_rate_percent == brine_rate &&
+        (now_ms - disp_state.last_tx_ms) < DISP_RATE_RESEND_MS) {
+        return;
+    }
+
     // Store rates
     disp_state.salt_rate_percent = salt_rate;
     disp_state.brine_rate_percent = brine_rate;
@@ -176,6 +184,13 @@ void Dispersion_SetRateDirect(uint8_t salt_rate, uint8_t brine_rate)
 
     if (salt_rate > 100) salt_rate = 100;
     if (brine_rate > 100) brine_rate = 100;
+
+    uint32_t now_ms = HAL_GetTick();
+    if (disp_state.salt_rate_percent == salt_rate &&
+        disp_state.brine_rate_percent == brine_rate &&
+        (now_ms - disp_state.last_tx_ms) < 250u) {
+        return;
+    }
 
     disp_state.salt_rate_percent = salt_rate;
     disp_state.brine_rate_percent = brine_rate;

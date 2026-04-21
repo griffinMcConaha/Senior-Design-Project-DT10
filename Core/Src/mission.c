@@ -280,7 +280,9 @@ void Mission_PrintSummary(void)
 uint8_t Mission_PersistCurrent(uint16_t current_index, uint8_t mission_active)
 {
     if (g_current_mission.waypoint_count == 0) {
-        Mission_ClearPersisted();
+        // A waypoint reload briefly empties the runtime mission buffer before the
+        // new batch arrives. Do not erase the last saved mission in that window.
+        // Explicit clear and mission-complete paths already wipe the checkpoint.
         return 1;
     }
 

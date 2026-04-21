@@ -103,6 +103,12 @@ void RobotSM_OnEnter(RobotState_t s, RobotSM_t *sm)
             Stop_Motors();
             if (sm)
             {
+                if ((!sm->mission.waypoints || sm->mission.total_waypoints == 0) && Mission_GetWaypointCount() > 0u)
+                {
+                    RobotSM_LoadMission(sm, Mission_GetWaypoints(), Mission_GetWaypointCount());
+                    printf("[SM] Recovered AUTO mission from staged waypoint buffer\r\n");
+                }
+
                 if (sm->mission.waypoints && sm->mission.total_waypoints > 0)
                 {
                     if (sm->mission.current_index >= sm->mission.total_waypoints) {
@@ -117,8 +123,7 @@ void RobotSM_OnEnter(RobotState_t s, RobotSM_t *sm)
                 }
                 else
                 {
-                    printf("[SM] ERROR: No mission loaded! Returning to PAUSE.\r\n");
-                    sm->requested = STATE_PAUSE;
+                    printf("[SM] WARNING: No mission loaded yet - waiting for waypoint sync\r\n");
                 }
             }
             break;
