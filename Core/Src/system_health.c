@@ -5,6 +5,11 @@
 #include <stdio.h>
 #include <string.h>
 
+/* system_health.c centralizes emergency-stop, degraded-sensor tracking, and
+ * operator-visible health reporting so safety policy stays in one place rather
+ * than being duplicated across individual device drivers.
+ */
+
 // ANSI color codes for terminal output
 #define ANSI_RED      "\033[31m"
 #define ANSI_YELLOW   "\033[33m"

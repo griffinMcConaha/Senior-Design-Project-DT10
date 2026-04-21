@@ -9,6 +9,12 @@
 #include <ctype.h>
 #include <stdbool.h>
 
+/* uart_lora.c is the STM32-side transport adapter for the LoRa/base-station
+ * link. It normalizes command ingress, streams telemetry/diagnostics outward,
+ * and tracks link health so the rest of the firmware can reason about command
+ * freshness instead of raw UART bytes.
+ */
+
 // ============================================================================
 // LoRA UART COMMUNICATION MODULE (UART 5)
 // Receives commands from mobile app via LoRA ESP32

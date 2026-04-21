@@ -4,6 +4,11 @@
 #include <string.h>
 #include <math.h>
 
+/* Mission persistence keeps the current waypoint list and execution index in
+ * flash so autonomy can survive resets and be restored with explicit metadata
+ * about whether the mission was active when the checkpoint was written.
+ */
+
 #define MISSION_FLASH_BASE         0x080E0000u
 #define MISSION_FLASH_SECTOR       FLASH_SECTOR_11
 #define MISSION_FLASH_VOLTAGE      FLASH_VOLTAGE_RANGE_3
@@ -31,6 +36,8 @@ typedef struct {
 static Mission_t g_current_mission = {0};
 static MissionRestoreInfo_t g_restore_info = {0};
 
+// Lightweight checksum over the persisted mission blob so corrupted flash
+// checkpoints can be rejected before they affect runtime mission state.
 static uint32_t Mission_ChecksumBytes(const uint8_t *data, size_t len)
 {
     uint32_t hash = 2166136261u;

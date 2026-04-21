@@ -40,6 +40,11 @@
 #include "uart_lora.h"
 /* USER CODE END Includes */
 
+/* main.c is the top-level orchestrator for the STM32 firmware. It brings up
+ * peripherals and modules, then runs the periodic control loop that ties
+ * together sensing, safety, state transitions, mission execution, and LoRa I/O.
+ */
+
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 

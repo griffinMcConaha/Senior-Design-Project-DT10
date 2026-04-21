@@ -4,6 +4,11 @@
 #include "mission.h"
 #include "stdio.h"
 
+/* robot_sm.c owns the authoritative robot state machine. It is responsible for
+ * safe transitions, latching fault/estop behavior, and coordinating mission
+ * persistence when autonomy pauses, aborts, or resumes.
+ */
+
 // Convert fault code to human-readable string for logging
 static const char* FaultCodeToString(FaultCode_t fault)
 {
