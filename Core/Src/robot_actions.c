@@ -11,6 +11,11 @@
 #include <string.h>
 #include <math.h>
 
+/* robot_actions.c contains the state-specific behaviors invoked by the state
+ * machine, including direct manual driving, autonomous motion helpers, and the
+ * actuator/sensor interactions needed while each state is active.
+ */
+
 // ============================================================================
 // MANUAL CONTROL IMPLEMENTATION
 // ============================================================================
