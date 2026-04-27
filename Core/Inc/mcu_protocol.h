@@ -9,7 +9,7 @@
  *
  * Transport: CAN Bus (primary) or UART (secondary/fallback)
  * 
- * Created on: Jan 2025
+ * Created on: Jan 2026
  */
 
 #ifndef MCU_PROTOCOL_H
