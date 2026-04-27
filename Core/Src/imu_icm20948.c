@@ -17,7 +17,7 @@
 #include <stdio.h>
 
 // ======================================================
-// ICM-20948 register defs (moved from your main.c)
+// ICM-20948 register defs
 // ======================================================
 
 // ICM-20948 Register Banks
