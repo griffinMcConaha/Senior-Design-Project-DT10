@@ -4,7 +4,7 @@ This document is the detailed technical companion to `README.md`.
 
 ## 1) Mission and System Context
 
-DT10 is an embedded robotic platform intended to apply anti-icing material while operating safely in outdoor environments. The firmware is designed around:
+RAIS is an embedded robotic platform intended to apply anti-icing material while operating safely in outdoor environments. The firmware is designed around:
 
 - Deterministic state-based control (`MANUAL`, `AUTO`, `PAUSE`, `ERROR`, `ESTOP`)
 - Continuous sensor intake and fusion (IMU, GPS, proximity)
@@ -258,18 +258,7 @@ Suggested commit categories:
 
 ---
 
-## 11) Suggested Next Documentation Improvements
-
-If desired, this detailed README can be split into:
-
-- `docs/ARCHITECTURE.md` (module interactions + diagrams)
-- `docs/SAFETY.md` (fault model, estop policy, watchdog)
-- `docs/BRINGUP.md` (first power-on checklist)
-- `docs/TUNING.md` (thresholds, filters, timing constants)
-
----
-
-## 12) Repository
+## 11) Repository
 
 Primary repository:
 
