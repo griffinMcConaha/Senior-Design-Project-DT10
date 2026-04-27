@@ -11,6 +11,10 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+// ----------------------------------------------------------------------------
+// Small parsing helpers used by the interactive console/test menus.
+// ----------------------------------------------------------------------------
+
 static int ParseTwoInts(const char *s, int *out_a, int *out_b)
 {
     if (!s || !out_a || !out_b) return 0;
@@ -37,6 +41,7 @@ static int ParseTwoInts(const char *s, int *out_a, int *out_b)
     return (found == 2);
 }
 
+// Parse a percent-like field by key name, clamp to [0..100].
 static int Console_ParseKeyedPercent(const char *input, const char *key_upper, int *out_value)
 {
     if (!input || !key_upper || !out_value) return 0;
@@ -71,6 +76,7 @@ static int Console_ParseKeyedPercent(const char *input, const char *key_upper, i
     return 1;
 }
 
+// Skip whitespace and common command separators.
 static const char *Console_SkipCommandDelims(const char *s)
 {
     while (s && (*s == ' ' || *s == '\t' || *s == ',' || *s == ';')) {
@@ -79,6 +85,7 @@ static const char *Console_SkipCommandDelims(const char *s)
     return s;
 }
 
+// Normalize command text: trim ends + collapse internal whitespace; optional uppercase.
 static void Console_NormalizeCommandText(const char *input, char *output, size_t output_size, uint8_t uppercase)
 {
     if (!output || output_size == 0) return;
@@ -118,6 +125,7 @@ static void Console_NormalizeCommandText(const char *input, char *output, size_t
     output[out_idx] = '\0';
 }
 
+// Heuristic: determine whether a substring is likely the start of a command token.
 static int Console_IsLikelyCommandStart(const char *text)
 {
     char normalized[48] = {0};
@@ -165,6 +173,7 @@ static int Console_IsLikelyCommandStart(const char *text)
     return 0;
 }
 
+// Decide whether a comma should be treated as a command separator.
 static int Console_ShouldSplitAtComma(const char *input, size_t segment_start, size_t comma_index)
 {
     const char *next = Console_SkipCommandDelims(input + comma_index + 1);
@@ -184,6 +193,7 @@ static int Console_ShouldSplitAtComma(const char *input, size_t segment_start, s
     char next_norm[48] = {0};
     Console_NormalizeCommandText(next, next_norm, sizeof(next_norm), 1);
 
+    // Do not split inside payload-ish commands that may contain commas.
     if ((strncmp(current, "TEST SBESP ", 11) == 0)
         || (strncmp(current, "TEST DISP ", 10) == 0)
         || (strncmp(current, "TEST LORA ", 10) == 0)
@@ -193,6 +203,7 @@ static int Console_ShouldSplitAtComma(const char *input, size_t segment_start, s
         return 0;
     }
 
+    // Keep paired salt/brine fields together.
     if ((strstr(current, "SALT:") != NULL) && (strncmp(next_norm, "BRINE:", 6) == 0)) {
         return 0;
     }
@@ -204,6 +215,7 @@ static int Console_ShouldSplitAtComma(const char *input, size_t segment_start, s
     return 1;
 }
 
+// Fail-safe: stop all outputs that could move the robot or run actuators.
 static void Console_ForceAllOutputsOff(const char *reason)
 {
     Sabertooth_StopAll();
@@ -228,6 +240,7 @@ void Console_SendSafeState(void)
 
 static int Console_TryHandleMixedMotorPercentCommand(const char *input);
 
+// Support "command1; command2, command3" style sequences for demos/scripts.
 static int Console_TryProcessCommandSequence(const char *input, RobotSM_t *sm)
 {
     if (!input || !sm) return 0;
@@ -236,6 +249,7 @@ static int Console_TryProcessCommandSequence(const char *input, RobotSM_t *sm)
     size_t start = 0;
     int commands_found = 0;
 
+    // First pass: count how many real fragments exist.
     for (size_t i = 0; i <= len; ++i) {
         int split_here = 0;
         if (input[i] == '\0' || input[i] == ';') {
@@ -265,6 +279,8 @@ static int Console_TryProcessCommandSequence(const char *input, RobotSM_t *sm)
     }
 
     printf("[DIAG] Running %d commands\r\n", commands_found);
+
+    // Second pass: execute each fragment.
     start = 0;
     for (size_t i = 0; i <= len; ++i) {
         int split_here = 0;
@@ -297,6 +313,10 @@ static int Console_TryProcessCommandSequence(const char *input, RobotSM_t *sm)
     return 1;
 }
 
+// ----------------------------------------------------------------------------
+// printf() redirection / console UART plumbing.
+// ----------------------------------------------------------------------------
+
 // Module-level pointer for printf redirection (USART2 by default)
 static UART_HandleTypeDef *g_printf_uart = NULL;
 
@@ -323,6 +343,7 @@ int _write(int file, char *ptr, int len)
     (void)file;
     if (g_printf_uart == NULL) return len;
 
+    // Send byte-by-byte to keep latency low; inject CR before LF for terminals.
     for (int i = 0; i < len; ++i) {
         if (ptr[i] == '\n' && (i == 0 || ptr[i - 1] != '\r')) {
             uint8_t cr = '\r';
@@ -413,6 +434,7 @@ void Console_PrintStatus(const ConsoleIO_t *c,
     uint32_t lora_overflow_count = LoRA_GetRxOverflowCount();
     uint32_t lora_isr_q_overflow_count = LoRA_GetIsrQueueOverflowCount();
 
+    // Heartbeat markers: show if a counter advanced since last status print.
     static uint32_t prev_disp_tx_count = 0;
     static uint32_t prev_disp_rx_count = 0;
     static uint32_t prev_lora_tx_count = 0;
@@ -501,6 +523,10 @@ void Console_PrintStatus(const ConsoleIO_t *c,
     printf(ANSI_MAGENTA "================================================\r\n" ANSI_RESET);
 }
 
+// ----------------------------------------------------------------------------
+// Console RX handling (USART2): line buffering + ANSI escape filtering.
+// ----------------------------------------------------------------------------
+
 // Console input buffer and handler (USART2 polled RX)
 static char console_input_buf[256] = {0};
 static uint16_t console_input_idx = 0;
@@ -515,6 +541,7 @@ static volatile uint32_t s_ansi_last_time = 0;
 
 #define CONSOLE_RX_ECHO 0
 
+// Optional local echo (kept non-blocking to avoid input lag).
 static inline void Console_EchoChar(uint8_t ch)
 {
     if (!g_printf_uart) return;
@@ -533,11 +560,13 @@ static inline void Console_EchoString(const char *text)
     }
 }
 
+// Kick the independent watchdog while blocking in menus/prompts.
 static inline void Console_WatchdogKick(void)
 {
     IWDG->KR = 0xAAAA;
 }
 
+// Blocking line reader for interactive sub-menus (ESC cancels).
 static int Console_ReadLineBlocking(const char *prompt, char *out, size_t out_size)
 {
     if (!out || out_size < 2) return 0;
@@ -606,6 +635,7 @@ static int Console_ReadLineBlocking(const char *prompt, char *out, size_t out_si
     }
 }
 
+// Send a canned LoRa command sequence for app-link bring-up tests.
 static void Console_SendLoRaExampleCommands(void)
 {
     static const char *examples[] = {
@@ -631,6 +661,7 @@ static void Console_SendLoRaExampleCommands(void)
     printf(ANSI_GREEN "[DIAG] LoRa example command sequence complete\r\n" ANSI_RESET);
 }
 
+// Send one raw LoRa frame and print whether TX counter advanced.
 static void Console_SendLoRaCommandAndReport(const char *text)
 {
     if (!text || text[0] == '\0') {
@@ -648,6 +679,7 @@ static void Console_SendLoRaCommandAndReport(const char *text)
     }
 }
 
+// Heuristic to avoid printing SB-ESP style payloads in the LoRa RX monitor.
 static int Console_IsLikelySbEspFrame(const char *s)
 {
     if (!s || s[0] == '\0') return 0;
@@ -661,6 +693,7 @@ static int Console_IsLikelySbEspFrame(const char *s)
     return 0;
 }
 
+// Printability filter: avoid spamming console with binary/noisy frames.
 static int Console_IsMostlyPrintableAscii(const char *s)
 {
     if (!s || s[0] == '\0') return 0;
@@ -680,6 +713,7 @@ static int Console_IsMostlyPrintableAscii(const char *s)
     return (printable * 100u) >= (85u * total);
 }
 
+// Normalize SB-ESP commands so keyed salt/brine fields become a consistent payload.
 static void Console_NormalizeSbEspCommand(const char *input, char *output, size_t output_size)
 {
     if (!output || output_size < 2) return;
@@ -719,6 +753,7 @@ static void Console_NormalizeSbEspCommand(const char *input, char *output, size_
     output[output_size - 1] = '\0';
 }
 
+// Whitelist of SB-ESP control commands that can be sent directly from the mixed shell.
 static int Console_IsDirectSbEspControlCommand(const char *input)
 {
     if (!input || input[0] == '\0') return 0;
@@ -747,6 +782,7 @@ static int Console_IsDirectSbEspControlCommand(const char *input)
     return 0;
 }
 
+// Send a SB-ESP command and print whether the last-status string changed.
 static void Console_SendSbEspCommandAndReport(const char *input)
 {
     const char *before = Dispersion_GetLastStatus();
@@ -780,6 +816,7 @@ static void Console_SendSbEspCommandAndReport(const char *input)
     Dispersion_SetTestResponseMode(0);
 }
 
+// Mixed-shell helper: accept "M1 30" / "1 30" shortcuts.
 static int Console_TryHandleMixedMotorPercentCommand(const char *input)
 {
     if (!input || input[0] == '\0') return 0;
@@ -804,6 +841,7 @@ static int Console_TryHandleMixedMotorPercentCommand(const char *input)
     return 0;
 }
 
+// Convenience macro: full-on actuator + full-speed motor preset (for demos only).
 static void Console_ApplyFullActivationPreset(void)
 {
     Dispersion_SetTestResponseMode(1);
@@ -820,6 +858,7 @@ static void Console_ApplyFullActivationPreset(void)
     printf(ANSI_GREEN "[DIAG] FULL ACTIVATION APPLIED\r\n" ANSI_RESET);
 }
 
+// Mixed interactive shell: one prompt controls both motors and SB-ESP outputs.
 static void Console_RunMixedControlShell(RobotSM_t *sm)
 {
     if (s_test_mode_flag) *s_test_mode_flag = 1;
@@ -898,6 +937,7 @@ static void Console_RunMixedControlShell(RobotSM_t *sm)
     Console_ShowTestMenu();
 }
 
+// Print the on-console quick test menu.
 void Console_ShowTestMenu(void)
 {
     // Clear console to remove old sensor status messages
@@ -966,6 +1006,7 @@ void Console_SetTestModeFlag(volatile uint8_t *flag)
     }
 }
 
+// Check-and-clear the ESC latch used by test menus.
 uint8_t Console_CheckEscPressed(void)
 {
     if (s_esc_pressed) {
@@ -982,6 +1023,8 @@ uint32_t Console_GetLastInputMs(void)
 {
     return s_console_last_input_ms;
 }
+
+// USART2 RX byte handler: filters ANSI, tracks single-key shortcuts, line-buffers commands.
 void Console_RxByte(uint8_t byte, RobotSM_t *sm)
 {
     const uint8_t in_test_mode = (s_test_mode_flag && (*s_test_mode_flag != 0)) ? 1u : 0u;
@@ -990,7 +1033,7 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm)
     // Terminal can send ANSI escape sequences (arrow keys, etc.) as 0x1B + 0x5B + [params] + [final].
     // These must be filtered out to prevent random characters in commands.
     uint32_t now_ms = HAL_GetTick();
-    
+
     if (s_ansi_state == 0) {
         // Not in an ANSI sequence. Check if this byte starts one.
         if (byte == 0x1B) {
@@ -1068,7 +1111,7 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm)
     }
 
     // ===== Normal Command Input Processing (after ANSI filtering) =====
-    
+
     // Single-key shortcuts: make menu entry and numeric quick tests reliable even
     // when Enter handling is flaky under heavy UART traffic.
     if (console_input_idx == 0) {
@@ -1091,7 +1134,7 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm)
             return;
         }
     }
-    
+
     // Backspace handling
     if (byte == 0x08 || byte == 0x7F) {
         if (console_input_idx > 0) {
@@ -1132,6 +1175,7 @@ void Console_RxByte(uint8_t byte, RobotSM_t *sm)
     }
 }
 
+// Top-level command dispatcher for test menu + control commands.
 void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
 {
     if (!cmd || !sm) return;
@@ -1165,6 +1209,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         return;
     }
 
+    // Simple aliases to send raw LoRa commands from the console.
     if (strncmp(cmd_upper, "LORA ", 5) == 0 || strncmp(cmd_upper, "REMOTE ", 7) == 0 || strncmp(cmd_upper, "APPCMD ", 7) == 0)
     {
         const char *payload_orig = cmd_clean;
@@ -1336,8 +1381,6 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
         Console_ShowTestMenu();
         return;
     }
-
-
 
     if (strcmp(cmd_upper, "C") == 0)
     {
@@ -1983,7 +2026,6 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             return;
         }
 
-
         // TEST SALT <rate_0_100>
         if (strncmp(subcmd_up, "SALT", 4) == 0)
         {
@@ -2347,7 +2389,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
             extern UART_HandleTypeDef huart2;
             printf(ANSI_YELLOW "[DIAG] ========== IMU TEMPERATURE TEST ==========\r\n" ANSI_RESET);
             printf(ANSI_CYAN "[DIAG] Reading temperature sensor (press ESC to exit)...\r\n\r\n" ANSI_RESET);
-            
+
             while (1)
             {
                 Console_WatchdogKick();
@@ -2371,7 +2413,7 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
                     if (imu.temperature_c > 25.0f) temp_color = ANSI_GREEN;
                     if (imu.temperature_c > 40.0f) temp_color = ANSI_YELLOW;
                     if (imu.temperature_c > 60.0f) temp_color = ANSI_RED;
-                    
+
                     printf("\r[DIAG] Temp: %s%.2f°C" ANSI_RESET "    ", temp_color, imu.temperature_c);
                 }
                 else
@@ -2488,5 +2530,3 @@ void Console_ProcessCommand(const char *cmd, RobotSM_t *sm)
     printf(ANSI_YELLOW "[DIAG] Unrecognized command: %s\r\n" ANSI_RESET, cmd_clean);
     printf("[DIAG] Try: TEST MOTOR 1 30  (or type HELP)\r\n");
 }
-
-
