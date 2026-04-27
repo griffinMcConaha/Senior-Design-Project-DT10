@@ -9,9 +9,12 @@
  * about whether the mission was active when the checkpoint was written.
  */
 
+/* NOTE: Must point at a free flash sector reserved for mission storage. */
 #define MISSION_FLASH_BASE         0x080E0000u
 #define MISSION_FLASH_SECTOR       FLASH_SECTOR_11
 #define MISSION_FLASH_VOLTAGE      FLASH_VOLTAGE_RANGE_3
+
+/* Magic/version protect against reading random flash as a valid checkpoint. */
 #define MISSION_PERSIST_MAGIC      0x4D495331u
 #define MISSION_PERSIST_VERSION    1u
 
@@ -26,10 +29,12 @@ typedef struct {
     uint16_t version;
     uint16_t waypoint_count;
     uint16_t current_index;
+    /* mission_active is persisted so UI/autonomy can decide whether to resume. */
     uint8_t mission_active;
     uint8_t reserved[3];
     MissionMetadata_t metadata;
     Waypoint_t waypoints[MAX_WAYPOINTS];
+    /* Checksum validates integrity of everything above. */
     uint32_t checksum;
 } MissionCheckpoint_t;
 
@@ -50,6 +55,7 @@ static uint32_t Mission_ChecksumBytes(const uint8_t *data, size_t len)
 
 static void Mission_ResetRuntime(void)
 {
+    /* Clears runtime mission only (does not touch flash). */
     memset(&g_current_mission, 0, sizeof(g_current_mission));
 }
 
@@ -59,6 +65,7 @@ static uint8_t Mission_ReadCheckpoint(MissionCheckpoint_t *out_checkpoint)
         return 0;
     }
 
+    /* Read directly from memory-mapped flash address. */
     const MissionCheckpoint_t *stored = (const MissionCheckpoint_t *)MISSION_FLASH_BASE;
     if (stored->magic != MISSION_PERSIST_MAGIC || stored->version != MISSION_PERSIST_VERSION) {
         return 0;
@@ -66,6 +73,7 @@ static uint8_t Mission_ReadCheckpoint(MissionCheckpoint_t *out_checkpoint)
     if (stored->waypoint_count == 0 || stored->waypoint_count > MAX_WAYPOINTS) {
         return 0;
     }
+    /* current_index == waypoint_count is allowed (mission complete). */
     if (stored->current_index > stored->waypoint_count) {
         return 0;
     }
@@ -94,6 +102,7 @@ static uint8_t Mission_WriteCheckpoint(const MissionCheckpoint_t *checkpoint)
     erase.Sector = MISSION_FLASH_SECTOR;
     erase.NbSectors = 1;
 
+    /* Erase is required before programming (flash bits only go 1->0 when writing). */
     if (HAL_FLASHEx_Erase(&erase, &sector_error) != HAL_OK) {
         HAL_FLASH_Lock();
         printf("[MISSION] FLASH erase failed (sector=%lu err=%lu)\r\n", (unsigned long)erase.Sector, (unsigned long)sector_error);
@@ -102,6 +111,7 @@ static uint8_t Mission_WriteCheckpoint(const MissionCheckpoint_t *checkpoint)
 
     const uint8_t *bytes = (const uint8_t *)checkpoint;
     for (uint32_t offset = 0; offset < sizeof(MissionCheckpoint_t); offset++) {
+        /* Byte-write keeps it simple/portable; can be optimized to word writes later. */
         if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_BYTE, MISSION_FLASH_BASE + offset, bytes[offset]) != HAL_OK) {
             HAL_FLASH_Lock();
             printf("[MISSION] FLASH program failed at +%lu\r\n", (unsigned long)offset);
@@ -131,6 +141,7 @@ void Mission_ClearPersisted(void)
     (void)HAL_FLASHEx_Erase(&erase, &sector_error);
     HAL_FLASH_Lock();
 
+    /* Also clear restore info so callers don't think a mission is available. */
     memset(&g_restore_info, 0, sizeof(g_restore_info));
     printf("[MISSION] Cleared persisted mission checkpoint\r\n");
 }
@@ -142,6 +153,7 @@ void Mission_Init(void)
     Mission_ResetRuntime();
     memset(&g_restore_info, 0, sizeof(g_restore_info));
 
+    /* If a valid checkpoint exists, rebuild runtime mission from flash. */
     if (Mission_ReadCheckpoint(&checkpoint)) {
         memcpy(&g_current_mission.metadata, &checkpoint.metadata, sizeof(MissionMetadata_t));
         memcpy(g_current_mission.waypoints, checkpoint.waypoints, sizeof(Waypoint_t) * checkpoint.waypoint_count);
@@ -188,6 +200,8 @@ uint8_t Mission_AddWaypoint(float latitude, float longitude, uint8_t salt_rate, 
     Waypoint_t *wp = &g_current_mission.waypoints[g_current_mission.waypoint_count];
     wp->latitude = latitude;
     wp->longitude = longitude;
+
+    /* Store as 0.0–1.0 fractions (input is percent). */
     wp->salt_rate = (float)salt_rate / 100.0f;
     wp->brine_rate = (float)brine_rate / 100.0f;
 
@@ -210,6 +224,7 @@ void Mission_RemoveLastWaypoint(void)
     }
 }
 
+/* Distance between two lat/lon points in meters (great-circle / Haversine). */
 static float Haversine_Distance(float lat1, float lon1, float lat2, float lon2)
 {
     const float R = 6371000.0f;
@@ -233,6 +248,7 @@ void Mission_CalculateStats(float robot_width_m, float coverage_overlap_m)
         return;
     }
 
+    /* Total distance is the polyline length through all waypoints in order. */
     float total_distance = 0.0f;
     for (uint16_t i = 0; i < (g_current_mission.waypoint_count - 1); i++) {
         Waypoint_t *wp1 = &g_current_mission.waypoints[i];
@@ -240,13 +256,16 @@ void Mission_CalculateStats(float robot_width_m, float coverage_overlap_m)
         total_distance += Haversine_Distance(wp1->latitude, wp1->longitude, wp2->latitude, wp2->longitude);
     }
 
+    /* Clamp effective width to avoid divide-by-zero / negative area estimates. */
     float effective_width = robot_width_m - coverage_overlap_m;
     if (effective_width < 0.5f) effective_width = 0.5f;
+
+    /* Simple planning assumptions (tune constants as needed). */
     float coverage_area = total_distance * effective_width;
     float coverage_200m2_units = coverage_area / 200.0f;
     float salt_needed = coverage_200m2_units * 1.0f;
     float brine_needed = coverage_200m2_units * 9.0f;
-    float estimated_time = total_distance / 0.5f;
+    float estimated_time = total_distance / 0.5f; /* assumes ~0.5 m/s average speed */
 
     g_current_mission.metadata.total_distance_m = total_distance;
     g_current_mission.metadata.total_coverage_m2 = coverage_area;
@@ -267,6 +286,7 @@ const MissionMetadata_t* Mission_GetMetadata(void)
 
 Waypoint_t* Mission_GetWaypoints(void)
 {
+    /* Returns internal buffer (caller must not free). */
     return g_current_mission.waypoints;
 }
 
@@ -293,6 +313,7 @@ uint8_t Mission_PersistCurrent(uint16_t current_index, uint8_t mission_active)
         return 1;
     }
 
+    /* Keep index in-range for safety. */
     if (current_index > g_current_mission.waypoint_count) {
         current_index = g_current_mission.waypoint_count;
     }
@@ -306,6 +327,8 @@ uint8_t Mission_PersistCurrent(uint16_t current_index, uint8_t mission_active)
     checkpoint.mission_active = mission_active ? 1u : 0u;
     memcpy(&checkpoint.metadata, &g_current_mission.metadata, sizeof(MissionMetadata_t));
     memcpy(checkpoint.waypoints, g_current_mission.waypoints, sizeof(Waypoint_t) * g_current_mission.waypoint_count);
+
+    /* Checksum must be computed last (after all fields are populated). */
     checkpoint.checksum = Mission_ChecksumBytes((const uint8_t *)&checkpoint, sizeof(MissionCheckpoint_t) - sizeof(uint32_t));
 
     if (!Mission_WriteCheckpoint(&checkpoint)) {
@@ -345,6 +368,7 @@ uint8_t Mission_Load(uint8_t slot)
         return 0;
     }
 
+    /* Rebuild runtime mission from the persisted checkpoint. */
     Mission_ResetRuntime();
     memcpy(&g_current_mission.metadata, &checkpoint.metadata, sizeof(MissionMetadata_t));
     memcpy(g_current_mission.waypoints, checkpoint.waypoints, sizeof(Waypoint_t) * checkpoint.waypoint_count);
@@ -365,6 +389,7 @@ uint8_t Mission_Save(uint8_t slot)
         printf("[MISSION] ERROR: Only slot 0 is implemented for checkpoint save\r\n");
         return 0;
     }
+    /* Save uses the most recently known restore index/active state. */
     return Mission_PersistCurrent(g_restore_info.current_index, g_restore_info.mission_active);
 }
 
