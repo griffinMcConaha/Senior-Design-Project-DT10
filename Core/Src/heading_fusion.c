@@ -156,7 +156,7 @@ void HeadingFusion_Update(HeadingFusion_t *hf,
         if (hf->accel_speed_filt_kn > 30.0f) hf->accel_speed_filt_kn = 30.0f;  // Max ~60 km/h
     }
 
-    // 1) Update filtered GPS speed/course (THIS is what your main was missing)
+    // Update filtered GPS speed/course 
     // Speed LPF
     {
         const float a_spd = 0.10f; // can tune
@@ -167,7 +167,7 @@ void HeadingFusion_Update(HeadingFusion_t *hf,
         }
     }
 
-    // Course LPF in radians, but be careful around wrap
+    // Course LPF in radians, careful around wrap
     {
         const float a_crs = 0.15f; // can tune
         if (gps->has_fix && gps->speed_knots > 0.5f) {
