@@ -59,7 +59,7 @@ static float Compute_FusedHeading(HeadingFusion_t *hf,
     float fused = gyro_yaw_rad;
     float weight = 0.0f;
 
-    // same weighting idea you had, but now uses hf's filtered GPS state
+    // same weighting idea, but uses uses hf's filtered GPS state
     if (!gps->has_fix || !hf->gps_course_filt_init) {
         weight = 0.0f;
         hf->gps_speed_filt_kn = 0.0f;
