@@ -81,7 +81,7 @@ static float Compute_FusedHeading(HeadingFusion_t *hf,
 
     fused = WrapPi(fused);
 
-    // same confidence heuristic you used
+    // Confidence Heading heuristic
     if (!imu_ok) {
         hf->heading_confidence = 0.1f;
     } else if (!gps->has_fix || hf->gps_speed_filt_kn < 0.3f) {
