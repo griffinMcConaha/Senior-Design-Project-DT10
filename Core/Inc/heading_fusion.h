@@ -18,7 +18,7 @@ typedef struct
 {
     float yaw_gyro_rad;        /**< Integrated gyro yaw (rad) */
     float yaw_fused_rad;       /**< GPS-corrected yaw (rad) */
-    float yaw_deg;             /**< Fused yaw (degrees) - USE THIS */
+    float yaw_deg;             /**< Fused yaw (degrees) */
     float pitch_deg;           /**< Pitch angle from IMU (deg) */
     float roll_deg;            /**< Roll angle from IMU (deg) */
     float gps_speed_filt_kn;   /**< Filtered GPS speed (knots) */
@@ -27,7 +27,7 @@ typedef struct
     float heading_confidence;  /**< Trust level 0..1 */
     float gps_weight;          /**< GPS correction factor 0..0.1 */
     float accel_speed_filt_kn; /**< Accel-integrated speed estimate (knots) */
-    float speed_fused_kn;      /**< GPS + accel blended speed (knots) - USE THIS */
+    float speed_fused_kn;      /**< GPS + accel blended speed (knots) */
 } HeadingFusion_t;
 
 /** @brief Initialize heading fusion filter */
