@@ -298,11 +298,11 @@ static void IMU_DiagnosticBusScan(void)
         HAL_StatusTypeDef st = HAL_I2C_Mem_Read(s_hi2c, test_addr, 0x00, 1, &dummy, 1, I2C_TIMEOUT_MS);
         
         if (st == HAL_OK) {
-            printf(ANSI_GREEN "[IMU][DIAG] ✓ Address 0x%02X ACK (data=0x%02X) - RESPONSIVE\r\n" ANSI_RESET, 
+            printf(ANSI_GREEN "[IMU][DIAG] Address 0x%02X ACK (data=0x%02X) - RESPONSIVE\r\n" ANSI_RESET, 
                    addr_7bit, dummy);
             devices_found++;
         } else {
-            printf(ANSI_YELLOW "[IMU][DIAG] ✗ Address 0x%02X: status=%d err=0x%lX\r\n" ANSI_RESET, 
+            printf(ANSI_YELLOW "[IMU][DIAG] Address 0x%02X: status=%d err=0x%lX\r\n" ANSI_RESET, 
                    addr_7bit, (int)st, (unsigned long)s_hi2c->ErrorCode);
         }
     }
